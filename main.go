@@ -4,9 +4,24 @@ import (
 	"fmt"
 
 	"github.com/blaketylerfullerton/GoLlama/model"
+	"github.com/blaketylerfullerton/GoLlama/tokenizer"
 )
 
 func main() {
+	tok, err := tokenizer.FromDirectory("tokenizer/testdata")
+	if err != nil {
+		panic(err)
+	}
+
+	text := "Hello, world! This is GoLlama."
+	ids := tok.Encode(text)
+	decoded := tok.Decode(ids)
+
+	fmt.Println("Input:  ", text)
+	fmt.Println("Ids:    ", ids)
+	fmt.Println("Decoded:", decoded)
+	fmt.Println()
+
 	cfg := model.GPTConfig{
 		SequenceLen: 128,
 		VocabSize:   1000, // small fake vocab for testing
