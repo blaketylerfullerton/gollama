@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 
+	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
 )
 
@@ -12,30 +13,49 @@ func main() {
 		panic(err)
 	}
 
-	text := "Hello, world! This is GoLlama. Blake is now testing the tokenizer peice"
+	text := "Hello, world. Testing tokenization layer"
 	ids := tok.Encode(text)
 	decoded := tok.Decode(ids)
 
 	fmt.Println("Input:  ", text)
 	fmt.Println("Ids:    ", ids)
 	fmt.Println("Decoded:", decoded)
-	fmt.Println()
+	fmt.Println("---------------")
 
-	// cfg := model.GPTConfig{
-	// 	SequenceLen: 128,
-	// 	VocabSize:   1000, // small fake vocab for testing
-	// 	NLayer:      2,
-	// 	NHead:       4,
-	// 	NKVHead:     4,
-	// 	NEmbed:      32,
-	// 	Rotary:      10000,
-	// }
+	// Embedding step: turn each token id into a vector.
+	// We don't have real trained weights yet, so we use a randomly
+	// initialized table sized to the tokenizer's vocab — this just lets
+	// us see the embedding lookup working end to end.
+	nEmbd := 32
+	wte := model.NewRandomEmbedding(tok.VocabSize(), nEmbd)
+	vectors := model.Embed(wte, ids, nEmbd)
 
-	// gpt := model.NewRandomGPT(cfg) // helper you'll add — fills weights with random values
+	fmt.Println("Embedding shape:", len(vectors), "tokens x", nEmbd, "dims")
+	fmt.Println(colHeader(previewDims))
+	fmt.Println(vecRow("tok 0", vectors[0], previewDims))
+	fmt.Println("---------------")
 
-	// tokens := []int{5, 10, 15, 20}
-	// logits := gpt.Forward(tokens)
+	headDim := nEmbd //pretending the whole embedding vector is one head for this demo
 
-	// fmt.Printf("Output shape: %d tokens x %d vocab\n", len(logits), len(logits[0]))
-	// fmt.Println("First token's top-5 logits:", logits[0][:5])
+	wq := model.NewRandomLinear(nEmbd, headDim)
+	wk := model.NewRandomLinear(nEmbd, headDim)
+
+	q := model.MatMul(vectors, wq) // (T, headDim)
+	k := model.MatMul(vectors, wk) // (T, headDim)
+
+	cos, sin := model.PrecomputeRotary(len(ids), headDim, 10000)
+
+	for t := range q {
+		q[t] = model.ApplyRotary(q[t], cos[t], sin[t])
+		k[t] = model.ApplyRotary(k[t], cos[t], sin[t])
+	}
+
+	PrintRotaryTable(cos, sin, 4)
+
+	for t, vec := range vectors {
+		rotated := model.ApplyRotary(vec, cos[t], sin[t])
+		piece := tok.Decode([]int{ids[t]})
+		PrintVecDiff(fmt.Sprintf("token %d  id=%d  %q", t, ids[t], piece), vec, rotated)
+	}
+
 }

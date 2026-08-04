@@ -101,6 +101,12 @@ func (t *Tokenizer) bpe(chunk string) []string {
 	return symbols
 }
 
+// VocabSize returns the number of tokens in the vocabulary, i.e. the
+// number of rows an embedding table needs to cover every possible id.
+func (t *Tokenizer) VocabSize() int {
+	return len(t.idToToken)
+}
+
 func (t *Tokenizer) Decode(ids []int) string {
 	var sb strings.Builder
 	for _, id := range ids {
