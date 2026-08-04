@@ -48,14 +48,15 @@ func main() {
 	for t := range q {
 		q[t] = model.ApplyRotary(q[t], cos[t], sin[t])
 		k[t] = model.ApplyRotary(k[t], cos[t], sin[t])
+
+		//QK Norm
+		q[t] = model.RMSNormVec(q[t])
+		k[t] = model.RMSNormVec(k[t])
 	}
 
 	PrintRotaryTable(cos, sin, 4)
 
-	for t, vec := range vectors {
-		rotated := model.ApplyRotary(vec, cos[t], sin[t])
-		piece := tok.Decode([]int{ids[t]})
-		PrintVecDiff(fmt.Sprintf("token %d  id=%d  %q", t, ids[t], piece), vec, rotated)
-	}
+	//Causal Attention (Scores, softmax, weigthted sum over V)
 
+	//Output projection
 }
