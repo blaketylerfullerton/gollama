@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 
 	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
@@ -39,9 +40,11 @@ func main() {
 
 	wq := model.NewRandomLinear(nEmbd, headDim)
 	wk := model.NewRandomLinear(nEmbd, headDim)
+	wv := model.NewRandomLinear(nEmbd, headDim)
 
 	q := model.MatMul(vectors, wq) // (T, headDim)
 	k := model.MatMul(vectors, wk) // (T, headDim)
+	v := model.MatMul(vectors, wv)
 
 	cos, sin := model.PrecomputeRotary(len(ids), headDim, 10000)
 
@@ -54,9 +57,15 @@ func main() {
 		k[t] = model.RMSNormVec(k[t])
 	}
 
-	PrintRotaryTable(cos, sin, 4)
-
 	//Causal Attention (Scores, softmax, weigthted sum over V)
+	attnOut, weights := model.CausalAttention(q, k, v) // (T, headDim)
+
+	fmt.Println("Attention out of shape: ", len(attnOut), "x", len(attnOut[0]))
+	fmt.Println("attnOut[0] == v[0]: ", reflect.DeepEqual(attnOut[0], v))
+	fmt.Println(weights)
 
 	//Output projection
+	wproj := model.NewRandomLinear(headDim, nEmbd)
+	attnOut = model.MatMul(attnOut, wproj)
+
 }
