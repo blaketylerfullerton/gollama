@@ -61,11 +61,29 @@ func main() {
 	attnOut, weights := model.CausalAttention(q, k, v) // (T, headDim)
 
 	fmt.Println("Attention out of shape: ", len(attnOut), "x", len(attnOut[0]))
-	fmt.Println("attnOut[0] == v[0]: ", reflect.DeepEqual(attnOut[0], v))
+	fmt.Println("attnOut[0] == v[0]: ", reflect.DeepEqual(attnOut[0], v[0]))
 	fmt.Println(weights)
 
 	//Output projection
 	wproj := model.NewRandomLinear(headDim, nEmbd)
 	attnOut = model.MatMul(attnOut, wproj)
+	x := model.Add(vectors, attnOut)
+
+	//MLP (Multi Layer perceptron)
+	normed := model.RMSNorm(x)
+	wfc := model.NewRandomLinear(nEmbd, 4*nEmbd)
+	wmlpProj := model.NewRandomLinear(4*nEmbd, nEmbd)
+	mlpOut := model.MLP(normed, wfc, wmlpProj)
+	x = model.Add(x, mlpOut) //second residual. Block Complete
+
+	// Final Norm + LM head
+	x = model.RMSNorm(x)
+	lmHead := model.NewRandomLinear(nEmbd, tok.VocabSize())
+	logits := model.MatMul(x, lmHead)
+	logits = model.SoftCap(logits,15 ) // 15*tanh(x/15)
+
+	fmt.Println("---------------")
+	last := logits[len(logits)-1]
+	fmt.Println("Logits shape:", len(logits),  "x", len(last))
 
 }
