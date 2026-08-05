@@ -37,27 +37,20 @@ func main() {
 	fmt.Println("---------------")
 
 	nHead := 4
+	nLayer := 2
 	headDim := nEmbd / nHead
-
-	wq := model.NewRandomLinear(nEmbd, nHead*headDim)
-	wk := model.NewRandomLinear(nEmbd, nHead*headDim)
-	wv := model.NewRandomLinear(nEmbd, nHead*headDim)
-	wproj := model.NewRandomLinear(nHead*headDim, nEmbd)
 
 	cos, sin := model.PrecomputeRotary(len(ids), headDim, 10000)
 
-	attnIn := model.RMSNorm(vectors) // seperate normed copy, input to attention only
+	blocks := make([]model.Block, nLayer)
+	for i := range blocks {
+		blocks[i] = model.NewRandomBlock(nEmbd, nHead)
+	}
 
-	attnOut, _ := model.MultiHeadAttention(attnIn, wq, wk, wv, wproj, cos, sin, nHead)
-	x := model.Add(vectors, attnOut)
-
-
-	//MLP (Multi Layer perceptron)
-	normed := model.RMSNorm(x)
-	wfc := model.NewRandomLinear(nEmbd, 4*nEmbd)
-	wmlpProj := model.NewRandomLinear(4*nEmbd, nEmbd)
-	mlpOut := model.MLP(normed, wfc, wmlpProj)
-	x = model.Add(x, mlpOut) //second residual. Block Complete
+	x := vectors
+	for i := range blocks {
+		x = blocks[i].Forward(x, cos, sin, nHead)
+	}
 
 	// Final Norm + LM head
 	x = model.RMSNorm(x)
