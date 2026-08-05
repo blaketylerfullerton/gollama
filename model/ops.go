@@ -17,7 +17,7 @@ func Add(a, b [][]float32) [][]float32 {
 
 func SoftCap(x [][]float32, limit float32) [][]float32 {
 	out := make([][]float32, len(x))
-	for i , row := range x {
+	for i, row := range x {
 		out[i] = make([]float32, len(row))
 		for j, v := range row {
 			out[i][j] = limit * float32(math.Tanh(float64(v/limit)))

@@ -80,10 +80,10 @@ func main() {
 	x = model.RMSNorm(x)
 	lmHead := model.NewRandomLinear(nEmbd, tok.VocabSize())
 	logits := model.MatMul(x, lmHead)
-	logits = model.SoftCap(logits,15 ) // 15*tanh(x/15)
+	logits = model.SoftCap(logits, 15) // 15*tanh(x/15)
 
 	fmt.Println("---------------")
 	last := logits[len(logits)-1]
-	fmt.Println("Logits shape:", len(logits),  "x", len(last))
+	fmt.Println("Logits shape:", len(logits), "x", len(last))
 
 }
