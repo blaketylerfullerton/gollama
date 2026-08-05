@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
@@ -61,5 +62,20 @@ func main() {
 	fmt.Println("---------------")
 	last := logits[len(logits)-1]
 	fmt.Println("Logits shape:", len(logits), "x", len(last))
+
+	type cand struct {
+		id    int
+		logit float32
+	}
+	cands := make([]cand, len(last))
+	for i, l := range last {
+		cands[i] = cand{i, l}
+	}
+	sort.Slice(cands, func(a, b int) bool { return cands[a].logit > cands[b].logit })
+
+	fmt.Println("Top 5 next-token predictions: ")
+	for _, c := range cands[:5] {
+		fmt.Printf(" %6d %8.4f %q\n", c.id, c.logit, tok.Decode([]int{c.id}))
+	}
 
 }
