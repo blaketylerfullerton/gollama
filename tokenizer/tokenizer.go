@@ -130,7 +130,7 @@ func (t *Tokenizer) Decode(ids []int) string {
 //
 
 func FromPretrained(hfPath string) (*Tokenizer, error) {
-	url := fmt.Sprint("https://huggingface.co/%s/resolve/main/tokenizer.json", hfPath)
+	url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/tokenizer.json", hfPath)
 	resp, err := http.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("Downloadning tokenizer error for %q: %w", hfPath, err)

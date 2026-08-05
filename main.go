@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"reflect"
 
 	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
@@ -30,44 +29,28 @@ func main() {
 	nEmbd := 32
 	wte := model.NewRandomEmbedding(tok.VocabSize(), nEmbd)
 	vectors := model.Embed(wte, ids, nEmbd)
+	vectors = model.RMSNorm(vectors)
 
 	fmt.Println("Embedding shape:", len(vectors), "tokens x", nEmbd, "dims")
 	fmt.Println(colHeader(previewDims))
 	fmt.Println(vecRow("tok 0", vectors[0], previewDims))
 	fmt.Println("---------------")
 
-	headDim := nEmbd //pretending the whole embedding vector is one head for this demo
+	nHead := 4
+	headDim := nEmbd / nHead
 
-	wq := model.NewRandomLinear(nEmbd, headDim)
-	wk := model.NewRandomLinear(nEmbd, headDim)
-	wv := model.NewRandomLinear(nEmbd, headDim)
-
-	q := model.MatMul(vectors, wq) // (T, headDim)
-	k := model.MatMul(vectors, wk) // (T, headDim)
-	v := model.MatMul(vectors, wv)
+	wq := model.NewRandomLinear(nEmbd, nHead*headDim)
+	wk := model.NewRandomLinear(nEmbd, nHead*headDim)
+	wv := model.NewRandomLinear(nEmbd, nHead*headDim)
+	wproj := model.NewRandomLinear(nHead*headDim, nEmbd)
 
 	cos, sin := model.PrecomputeRotary(len(ids), headDim, 10000)
 
-	for t := range q {
-		q[t] = model.ApplyRotary(q[t], cos[t], sin[t])
-		k[t] = model.ApplyRotary(k[t], cos[t], sin[t])
+	attnIn := model.RMSNorm(vectors) // seperate normed copy, input to attention only
 
-		//QK Norm
-		q[t] = model.RMSNormVec(q[t])
-		k[t] = model.RMSNormVec(k[t])
-	}
-
-	//Causal Attention (Scores, softmax, weigthted sum over V)
-	attnOut, weights := model.CausalAttention(q, k, v) // (T, headDim)
-
-	fmt.Println("Attention out of shape: ", len(attnOut), "x", len(attnOut[0]))
-	fmt.Println("attnOut[0] == v[0]: ", reflect.DeepEqual(attnOut[0], v[0]))
-	fmt.Println(weights)
-
-	//Output projection
-	wproj := model.NewRandomLinear(headDim, nEmbd)
-	attnOut = model.MatMul(attnOut, wproj)
+	attnOut, _ := model.MultiHeadAttention(attnIn, wq, wk, wv, wproj, cos, sin, nHead)
 	x := model.Add(vectors, attnOut)
+
 
 	//MLP (Multi Layer perceptron)
 	normed := model.RMSNorm(x)

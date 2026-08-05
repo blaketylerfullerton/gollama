@@ -65,3 +65,46 @@ func softmax(scores []float32, maxScore float32) {
 		scores[i] /= sumExp
 	}
 }
+
+// MultiHeadAttention runs nHead independant attention heads over disjoint
+// slices of the embedding and then concatenates and projects the result
+//
+// x is (T, nEmbed) and expected to already be normed. cos / sin must be sized
+func MultiHeadAttention(x [][]float32, wq, wk, wv, wproj Linear, cos, sin [][]float32, nHead int) ([][]float32, [][][]float32) {
+	T := len(x)
+	headDim := wq.Out / nHead
+
+	q := MatMul(x, wq) // (T, nHead*headDim)
+	k := MatMul(x, wk)
+	v := MatMul(x, wv)
+
+	out := make([][]float32, T)
+	for t := range out {
+		out[t] = make([]float32, nHead*headDim)
+	}
+	allWeights := make([][][]float32, nHead)
+
+	for h := 0; h < nHead; h++ {
+		lo, hi := h*headDim, (h+1)*headDim
+
+		//Pull out this heads slice as its own (T, headDim) matrix
+		qh := make([][]float32, T)
+		kh := make([][]float32, T)
+		vh := make([][]float32, T)
+		for t := 0; t < T; t++ {
+			//Rotatry + QK-norm, applied per head on this heads dims only.
+			qh[t] = RMSNormVec(ApplyRotary(q[t][lo:hi], cos[t], sin[t]))
+			kh[t] = RMSNormVec(ApplyRotary(k[t][lo:hi], cos[t], sin[t]))
+			vh[t] = v[t][lo:hi] //v stays raw
+		}
+
+		headOut, w := CausalAttention(qh, kh, vh)
+		allWeights[h] = w
+
+		// Concatenate: each head writes back into its own dim range.
+		for t := 0; t < T; t++ {
+			copy(out[t][lo:hi], headOut[t])
+		}
+	}
+	return MatMul(out, wproj), allWeights
+}
