@@ -70,7 +70,7 @@ func softmax(scores []float32, maxScore float32) {
 // slices of the embedding and then concatenates and projects the result
 //
 // x is (T, nEmbed) and expected to already be normed. cos / sin must be sized
-func MultiHeadAttention(x [][]float32, wq, wk, wv, wproj Linear, cos, sin [][]float32, nHead int) ([][]float32, [][][]float32) {
+func MultiHeadAttention(x [][]float32, wq, wk, wv, wproj Linear, nHead int) ([][]float32, [][][]float32) {
 	T := len(x)
 	headDim := wq.Out / nHead
 
@@ -97,14 +97,19 @@ func MultiHeadAttention(x [][]float32, wq, wk, wv, wproj Linear, cos, sin [][]fl
 			kh[t] = RMSNormVec(ApplyRotary(k[t][lo:hi], cos[t], sin[t]))
 			vh[t] = v[t][lo:hi] //v stays raw
 		}
-
+		for t := 0; t < T; t++ {
+			// GPT-2: no rotary, no qk nowm. Position info came from WPE
+			qh[t] = q[t][lo:hi]
+			kh[t] = k[t][lo:hi]
+			vh[t] = v[t][lo:hi]
+		}
 		headOut, w := CausalAttention(qh, kh, vh)
 		allWeights[h] = w
-
-		// Concatenate: each head writes back into its own dim range.
-		for t := 0; t < T; t++ {
+		
+		for t:=0; t <T, t++{
 			copy(out[t][lo:hi], headOut[t])
 		}
+
 	}
 	return MatMul(out, wproj), allWeights
 }

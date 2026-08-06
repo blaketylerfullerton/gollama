@@ -5,6 +5,7 @@ package model
 func NewRandomLinear(in, out int) Linear {
 	return Linear{
 		Weight: randFloats(in * out),
+		Bias:   make([]float32, out),
 		In:     in,
 		Out:    out,
 	}
@@ -21,6 +22,9 @@ func MatMul(x [][]float32, lin Linear) [][]float32 {
 			weightRow := lin.Weight[o*lin.In : (o+1)*lin.In]
 			for i := 0; i < lin.In; i++ {
 				sum += row[i] * weightRow[i]
+			}
+			if lin.Bias != nil {
+				sum += lin.Bias[o]
 			}
 			out[t][o] = sum
 		}

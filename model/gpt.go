@@ -17,12 +17,15 @@ type GPTConfig struct {
 
 type Linear struct {
 	Weight  []float32 // shape (out, in), row-major, no bias
+	Bias    []float32 // lenght out; nil when the layer has no bias
 	In, Out int
 }
 
 type Block struct {
-	Wq, Wk, Wv, Wproj Linear // attention
-	Wfc, Wmlp         Linear // mlp (c_fc, c_proj)
+	LN1               LayerNorm // before attentino
+	Wq, Wk, Wv, Wproj Linear
+	LN2               LayerNorm // before MLP
+	Wfc, Wmlp         Linear
 }
 
 type GPT struct {
