@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"math"
-	"sort"
 
 	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
@@ -97,14 +95,14 @@ func main() {
 	for _, temp := range []float64{0.7, 1.0, 1.5} {
 		fmt.Printf("\n  temperature %.1f\n", temp)
 		fmt.Printf("    %6s  %10s  %14s  %s\n", "id", "p(token)", "share of top 5", "token")
-		cands := topK(last, temp, 5)
+		cands := model.TopCandidates(last, temp, 5)
 		var top float64
 		for _, c := range cands {
-			top += c.prob
+			top += c.Prob
 		}
 		for _, c := range cands {
 			fmt.Printf("    %6d  %9.4f%%  %13.1f%%  %q\n",
-				c.id, 100*c.prob, 100*c.prob/top, tok.Decode([]int{c.id}))
+				c.ID, 100*c.Prob, 100*c.Prob/top, tok.Decode([]int{c.ID}))
 		}
 	}
 	fmt.Println("\n  Temperature divides the logits before softmax, so it only changes how")
@@ -113,10 +111,40 @@ func main() {
 		cfg.VocabSize, cfg.VocabSize, 100/float64(cfg.VocabSize))
 	fmt.Println("  Watch the share-of-top-5 column instead: that is where temperature shows.")
 
+	// --- 7. generation -----------------------------------------------------
+	// Generation calls Forward once per token, so the walkthrough has to come
+	// off first — otherwise it prints the entire trace twelve more times.
+	// Setting Trace back to nil is all it takes to go quiet.
+	gpt.Trace = nil
+
+	section("7. generating tokens")
+	fmt.Println("Each step samples from the last logit row, appends that token, and re-runs")
+	fmt.Println("the whole forward pass. That's O(T²) work over the run, which is exactly")
+	fmt.Println("what a KV cache exists to fix — but the slow version comes first, because")
+	fmt.Println("it's the reference the cached version has to reproduce.")
+	fmt.Printf("\nprompt: %q\n", text)
+	fmt.Print("output: ")
+
+	out, err := gpt.Generate(ids, model.GenerateOpts{
+		MaxTokens: 12,
+		SampleOpts: model.SampleOpts{
+			Temperature: 0.8,
+			TopK:        40,
+			TopP:        0.95,
+			Seed:        1,
+		},
+		OnToken: func(id int) { fmt.Print(tok.Decode([]int{id})) },
+	})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("\n\n%d tokens: %v\n", len(out), out)
+	fmt.Println("(random weights, so the text is noise — the loop itself is real)")
+
 	section("next up")
-	fmt.Println("  - a Generate loop that samples, appends, and re-runs")
 	fmt.Println("  - load real Qwen3 weights with model.FromDirectory")
-	fmt.Println("  - a KV cache so each new token doesn't recompute the whole prefix")
+	fmt.Println("  - a Qwen3-compatible tokenizer (this one is still GPT-2 shaped)")
+	fmt.Println("  - a KV cache, verified against the slow path above")
 }
 
 func section(title string) {
@@ -161,42 +189,4 @@ func printParams(cfg model.GPTConfig) {
 	if cfg.TieEmbed {
 		fmt.Println("  (embeddings are tied: the lm head reuses this table instead of its own)")
 	}
-}
-
-type cand struct {
-	id   int
-	prob float64
-}
-
-// topK applies temperature, softmaxes the whole row, and returns the k most
-// likely tokens. Dividing by temperature before exponentiating is all
-// "temperature" means: it scales the gaps between logits.
-func topK(logits []float32, temp float64, k int) []cand {
-	maxLogit := float64(logits[0])
-	for _, l := range logits {
-		if float64(l) > maxLogit {
-			maxLogit = float64(l)
-		}
-	}
-
-	probs := make([]float64, len(logits))
-	var sum float64
-	for i, l := range logits {
-		// Subtract the max before exp for numerical stability — it cancels out
-		// in the division below.
-		p := math.Exp((float64(l) - maxLogit) / temp)
-		probs[i] = p
-		sum += p
-	}
-
-	out := make([]cand, len(logits))
-	for i, p := range probs {
-		out[i] = cand{i, p / sum}
-	}
-	sort.Slice(out, func(a, b int) bool { return out[a].prob > out[b].prob })
-
-	if k > len(out) {
-		k = len(out)
-	}
-	return out[:k]
 }

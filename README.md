@@ -93,6 +93,24 @@ To get a checkpoint:
 huggingface-cli download Qwen/Qwen3-0.6B --local-dir ./checkpoints/qwen3-0.6b
 ```
 
+## Generating text
+
+```go
+out, err := gpt.Generate(ids, model.GenerateOpts{
+	MaxTokens:  64,
+	SampleOpts: model.SampleOpts{Temperature: 0.8, TopK: 40, TopP: 0.95, Seed: 1},
+	OnToken:    func(id int) { fmt.Print(tok.Decode([]int{id})) },
+})
+```
+
+Sample from the last logit row, append the token, re-run. `OnToken` streams each token as it arrives instead of making you wait for the whole completion.
+
+The sampling filters compose, and they're applied in this order: temperature divides the logits, softmax turns them into probabilities, then top-k and top-p each discard the tail. Whatever survives is renormalized and drawn from. `Temperature: 0` means greedy — take the argmax and ignore every other setting. Each `Sampler` owns its seeded RNG, so a run reproduces exactly regardless of what else is running.
+
+Stop tokens end the run and aren't included in the result. Both `opts.Stop` and the checkpoint's own `eos_token_id` are honored.
+
+One deliberate inefficiency: every step recomputes the entire prefix, which is `O(T²)` work over the run. The slow version comes first on purpose — it's the reference a KV cache has to reproduce exactly, and the baseline any speedup gets measured against.
+
 ## Tests
 
 ```bash
@@ -103,10 +121,11 @@ The safetensors and loader tests build synthetic checkpoints on disk using real 
 
 `TestForwardIsCausal` is the one I'd point at: truncating the input must not change the logits for the positions that remain, because no position may attend to the future. It's the strongest correctness property available without a reference implementation to compare against.
 
+The sampling tests check the distribution rather than just the range — draw 20000 times from a known set of probabilities and assert the observed frequencies match. There's also a test that `Generate` doesn't write into the caller's prompt slice, which the naive implementation passes only when the slice has no spare capacity.
+
 ## Not implemented yet
 
-- **Generation loop** — sampling a token, appending it, and re-running. Right now `Forward` gives you one pass and `main.go` prints the resulting distribution.
-- **KV cache** — every step currently recomputes the whole prefix, which is `O(T²)` work per token.
+- **KV cache** — every generation step currently recomputes the whole prefix. Once it exists, it has to produce logits identical to the uncached path.
 - **A Qwen3-compatible tokenizer.** The current one is GPT-2 shaped. The pretokenizer regex in `tokenizer.json` uses negative lookahead (`\s+(?!\S)`), which Go's stdlib `regexp` (RE2) cannot compile by design, so this needs a hand-written splitter.
 - **Performance.** Nothing is optimized. `[][]float32` is a pointer chase per row, matmul is a naive triple loop, and weights are widened to float32 on load.
 - **Verification against a reference.** No golden-logits test yet, so the rotary sign convention and QK-norm ordering are reasoned from the HuggingFace source rather than proven.
@@ -125,6 +144,8 @@ model/
   loader.go          maps Qwen3 tensor names onto the structs
   trace.go           the Tracer hook the forward pass narrates through
   gpt.go             the model, the full forward pass, rotary table management
+  generate.go        the autoregressive loop, stop tokens, streaming
+  sample.go          greedy / temperature / top-k / top-p sampling
   block.go           one transformer layer: pre-norm attention + pre-norm MLP
   attention.go       grouped-query attention, causal attention, softmax
   mlp.go             SwiGLU feed-forward

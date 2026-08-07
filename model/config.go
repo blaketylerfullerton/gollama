@@ -21,8 +21,9 @@ type GPTConfig struct {
 	Intermediate int // MLP hidden width (not necessarily 4*NEmbed)
 	RopeBase     float64
 	NormEps      float64
-	TieEmbed     bool // lm_head shares weights with the embedding table
-	SequenceLen  int
+	TieEmbed     bool  // lm_head shares weights with the embedding table
+	SequenceLen  int   // max_position_embeddings
+	EOSTokenIDs  []int // tokens that end generation; empty means none
 }
 
 // QKVOut returns the output widths of the q and k/v projections. They differ
@@ -35,17 +36,36 @@ func (c GPTConfig) GroupSize() int { return c.NHead / c.NKVHead }
 
 // hfConfig mirrors the subset of HuggingFace's config.json that we care about.
 type hfConfig struct {
-	VocabSize        int     `json:"vocab_size"`
-	HiddenSize       int     `json:"hidden_size"`
-	IntermediateSize int     `json:"intermediate_size"`
-	NumHiddenLayers  int     `json:"num_hidden_layers"`
-	NumAttnHeads     int     `json:"num_attention_heads"`
-	NumKVHeads       int     `json:"num_key_value_heads"`
-	HeadDim          int     `json:"head_dim"`
-	RMSNormEps       float64 `json:"rms_norm_eps"`
-	RopeTheta        float64 `json:"rope_theta"`
-	TieWordEmbed     bool    `json:"tie_word_embeddings"`
-	MaxPositions     int     `json:"max_position_embeddings"`
+	VocabSize        int      `json:"vocab_size"`
+	HiddenSize       int      `json:"hidden_size"`
+	IntermediateSize int      `json:"intermediate_size"`
+	NumHiddenLayers  int      `json:"num_hidden_layers"`
+	NumAttnHeads     int      `json:"num_attention_heads"`
+	NumKVHeads       int      `json:"num_key_value_heads"`
+	HeadDim          int      `json:"head_dim"`
+	RMSNormEps       float64  `json:"rms_norm_eps"`
+	RopeTheta        float64  `json:"rope_theta"`
+	TieWordEmbed     bool     `json:"tie_word_embeddings"`
+	MaxPositions     int      `json:"max_position_embeddings"`
+	EOSTokenID       tokenIDs `json:"eos_token_id"`
+}
+
+// tokenIDs decodes a field that HuggingFace writes either as a single id or as
+// a list of them — eos_token_id is both, depending on the model.
+type tokenIDs []int
+
+func (t *tokenIDs) UnmarshalJSON(b []byte) error {
+	var single int
+	if err := json.Unmarshal(b, &single); err == nil {
+		*t = []int{single}
+		return nil
+	}
+	var many []int
+	if err := json.Unmarshal(b, &many); err != nil {
+		return fmt.Errorf("eos_token_id is neither an id nor a list of ids: %s", b)
+	}
+	*t = many
+	return nil
 }
 
 // ConfigFromDirectory reads a HuggingFace config.json and translates it into a
@@ -80,6 +100,7 @@ func ConfigFromJSON(data []byte) (GPTConfig, error) {
 		NormEps:      hf.RMSNormEps,
 		TieEmbed:     hf.TieWordEmbed,
 		SequenceLen:  hf.MaxPositions,
+		EOSTokenIDs:  hf.EOSTokenID,
 	}
 
 	// Older configs omit head_dim and genuinely mean hidden/heads. Newer ones
