@@ -82,7 +82,7 @@ func softmax(scores []float32, maxScore float32) {
 //
 // x is (T, NEmbed) and expected to already be normed. cos / sin must be
 // (T, HeadDim/2) — one row of rotation angles per position.
-func (a *Attention) Forward(x [][]float32, cos, sin [][]float32) ([][]float32, [][][]float32) {
+func (a *Attention) Forward(x [][]float32, cos, sin [][]float32, tr Trace) ([][]float32, [][][]float32) {
 	T := len(x)
 
 	q := MatMul(x, a.Wq) // (T, NHead*HeadDim)
@@ -119,7 +119,13 @@ func (a *Attention) Forward(x [][]float32, cos, sin [][]float32) ([][]float32, [
 
 		qh := make([][]float32, T)
 		for t := 0; t < T; t++ {
-			qh[t] = ApplyRotary(a.QNorm.ForwardVec(q[t][lo:lo+a.HeadDim]), cos[t], sin[t])
+			normed := a.QNorm.ForwardVec(q[t][lo : lo+a.HeadDim])
+			qh[t] = ApplyRotary(normed, cos[t], sin[t])
+			// Report the last position: it has rotated the furthest, so the
+			// change is most visible there.
+			if t == T-1 {
+				tr.Rotary(h, normed, qh[t])
+			}
 		}
 
 		headOut, w := CausalAttention(qh, kHeads[kv], vHeads[kv])

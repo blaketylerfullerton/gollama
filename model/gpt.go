@@ -18,6 +18,10 @@ type GPT struct {
 	FinalNorm RMSNorm
 	LMHead    Linear
 
+	// Trace, when set, receives every intermediate value the forward pass
+	// produces. Leave it nil for normal inference.
+	Trace Tracer
+
 	// Rotary tables, grown on demand up to the longest sequence seen so far.
 	cos, sin [][]float32
 }
@@ -26,13 +30,29 @@ type GPT struct {
 // (T, VocabSize) — one row of next-token scores per input position.
 func (g *GPT) Forward(ids []int) [][]float32 {
 	g.ensureRotary(len(ids))
+	tr := Trace{Out: g.Trace, Layer: -1}
 
 	x := Embed(g.WTE, ids, g.Config.NEmbed)
+	tr.Stage("token embeddings", x)
+
 	for i := range g.Blocks {
-		x = g.Blocks[i].Forward(x, g.cos, g.sin)
+		tr.Layer = i
+		x = g.Blocks[i].Forward(x, g.cos, g.sin, tr)
 	}
+
+	tr.Layer = -1
 	x = g.FinalNorm.Forward(x)
-	return MatMul(x, g.LMHead)
+	tr.Stage("final norm", x)
+
+	logits := MatMul(x, g.LMHead)
+	tr.Stage("logits", logits)
+	return logits
+}
+
+// RotaryTables exposes the cos/sin lookup tables for inspection. They're built
+// lazily, so this is only populated after at least one Forward.
+func (g *GPT) RotaryTables() (cos, sin [][]float32) {
+	return g.cos, g.sin
 }
 
 // ensureRotary grows the cos/sin tables if this sequence is longer than any
