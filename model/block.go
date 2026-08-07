@@ -1,23 +1,28 @@
 package model
 
-func (b *Block) Forward(x [][]float32, nHead int) [][]float32 {
-	attnOut, _ := MultiHeadAttention(b.LN1.Forward(x), b.Wq, b.Wk, b.Wv, b.Wproj, nHead)
+// Block is one transformer layer: pre-norm attention with a residual, then
+// pre-norm MLP with a residual. "Pre-norm" means the norm happens on the way
+// into each sublayer, so the residual stream itself is never normalized.
+type Block struct {
+	InputNorm    RMSNorm // before attention
+	Attn         Attention
+	PostAttnNorm RMSNorm // before the MLP
+	MLP          MLP
+}
+
+func (b *Block) Forward(x [][]float32, cos, sin [][]float32) [][]float32 {
+	attnOut, _ := b.Attn.Forward(b.InputNorm.Forward(x), cos, sin)
 	x = Add(x, attnOut)
 
-	mlpOut := MLP(b.LN2.Forward(x), b.Wfc, b.Wmlp)
+	mlpOut := b.MLP.Forward(b.PostAttnNorm.Forward(x))
 	return Add(x, mlpOut)
 }
 
-func NewRandomBlock(nEmbd, nHead int) Block {
-	headDim := nEmbd / nHead
+func NewRandomBlock(cfg GPTConfig) Block {
 	return Block{
-		LN1:   NewRandomLayerNorm(nEmbd),
-		Wq:    NewRandomLinear(nEmbd, nHead*headDim),
-		Wk:    NewRandomLinear(nEmbd, nHead*headDim),
-		Wv:    NewRandomLinear(nEmbd, nHead*headDim),
-		Wproj: NewRandomLinear(nHead*headDim, nEmbd),
-		LN2:   NewRandomLayerNorm(nEmbd),
-		Wfc:   NewRandomLinear(nEmbd, 4*nEmbd),
-		Wmlp:  NewRandomLinear(4*nEmbd, nEmbd),
+		InputNorm:    NewRMSNorm(cfg.NEmbed, cfg.NormEps),
+		Attn:         NewRandomAttention(cfg),
+		PostAttnNorm: NewRMSNorm(cfg.NEmbed, cfg.NormEps),
+		MLP:          NewRandomMLP(cfg),
 	}
 }

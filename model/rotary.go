@@ -2,9 +2,11 @@ package model
 
 import "math"
 
-// precomputeRotary builds cos / sin lookup tables for every position
-// headDim is the size of one attensinots head vector (not the full embedding)
-// Returns two (seqLen, headDim/2) tables - cos[t]/sin[t] give the rotation angles for position t
+// PrecomputeRotary builds cos / sin lookup tables for every position.
+// headDim is the size of one attention head's vector (not the full embedding).
+// Returns two (seqLen, headDim/2) tables — cos[t]/sin[t] give the rotation
+// angles for position t. base is rope_theta from config: 10000 on older
+// models, 1e6 on Qwen3.
 func PrecomputeRotary(seqLen, headDim int, base float64) (cos, sin [][]float32) {
 	halfDim := headDim / 2
 	invFreq := make([]float64, halfDim)
@@ -28,15 +30,21 @@ func PrecomputeRotary(seqLen, headDim int, base float64) (cos, sin [][]float32) 
 	return cos, sin
 }
 
-// applyRotary rotates a single vector (e.g one atentions heads q or k)
-// using the cos / sin for its position. Splits the cevtor in half and rotates each pair (x[i], x[i+half] together)
+// ApplyRotary rotates a single vector (one attention head's q or k) using the
+// cos / sin for its position. Splits the vector in half and rotates each pair
+// (x[i], x[i+half]) together.
+//
+// The signs here match HuggingFace's rotate_half — x_embed = x*cos +
+// rotate_half(x)*sin where rotate_half(x) = cat(-x2, x1). Flipping them
+// rotates the other way, which is self-consistent with random weights but
+// silently wrong against trained ones.
 func ApplyRotary(x []float32, cos, sin []float32) []float32 {
 	d := len(x) / 2
 	out := make([]float32, len(x))
 	for i := 0; i < d; i++ {
 		x1, x2 := x[i], x[i+d]
-		out[i] = x1*cos[i] + x2*sin[i]
-		out[i+d] = -x1*sin[i] + x2*cos[i]
+		out[i] = x1*cos[i] - x2*sin[i]
+		out[i+d] = x2*cos[i] + x1*sin[i]
 	}
 	return out
 }

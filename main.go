@@ -16,52 +16,49 @@ func main() {
 
 	text := "Hello, world. Testing tokenization layer"
 	ids := tok.Encode(text)
-	decoded := tok.Decode(ids)
 
 	fmt.Println("Input:  ", text)
 	fmt.Println("Ids:    ", ids)
-	fmt.Println("Decoded:", decoded)
+	fmt.Println("Decoded:", tok.Decode(ids))
 	fmt.Println("---------------")
 
-	// Embedding step: turn each token id into a vector.
-	// We don't have real trained weights yet, so we use a randomly
-	// initialized table sized to the tokenizer's vocab — this just lets
-	// us see the embedding lookup working end to end.
-	nEmbd := 32
-	wte := model.NewRandomEmbedding(tok.VocabSize(), nEmbd)
-	vectors := model.Embed(wte, ids, nEmbd)
-	vectors = model.RMSNorm(vectors)
-
-	fmt.Println("Embedding shape:", len(vectors), "tokens x", nEmbd, "dims")
-	fmt.Println(colHeader(previewDims))
-	fmt.Println(vecRow("tok 0", vectors[0], previewDims))
-	fmt.Println("---------------")
-
-	nHead := 4
-	nLayer := 2
-	headDim := nEmbd / nHead
-
-	cos, sin := model.PrecomputeRotary(len(ids), headDim, 10000)
-
-	blocks := make([]model.Block, nLayer)
-	for i := range blocks {
-		blocks[i] = model.NewRandomBlock(nEmbd, nHead)
+	// A tiny Qwen3-shaped config. The two things worth noticing:
+	//   HeadDim (16) is NOT NEmbed/NHead (32/4 = 8)
+	//   NKVHead (2) < NHead (4), so query heads share kv heads
+	// Both mirror the real Qwen3-0.6B, so the shapes exercised here are the
+	// same ones a real checkpoint will hit. Weights are still random.
+	cfg := model.GPTConfig{
+		VocabSize:    tok.VocabSize(),
+		NLayer:       2,
+		NHead:        4,
+		NKVHead:      2,
+		NEmbed:       32,
+		HeadDim:      16,
+		Intermediate: 96,
+		RopeBase:     1e6,
+		NormEps:      1e-6,
+		TieEmbed:     true,
+		SequenceLen:  512,
 	}
 
-	x := vectors
-	for i := range blocks {
-		x = blocks[i].Forward(x, cos, sin, nHead)
+	gpt, err := model.NewRandomGPT(cfg)
+	if err != nil {
+		panic(err)
 	}
 
-	// Final Norm + LM head
-	x = model.RMSNorm(x)
-	lmHead := model.NewRandomLinear(nEmbd, tok.VocabSize())
-	logits := model.MatMul(x, lmHead)
-	logits = model.SoftCap(logits, 15) // 15*tanh(x/15)
-
+	fmt.Printf("Model: %d layers, %d embd, %d q heads / %d kv heads x %d head dim\n",
+		cfg.NLayer, cfg.NEmbed, cfg.NHead, cfg.NKVHead, cfg.HeadDim)
+	fmt.Printf("       q proj %d wide, kv proj %d wide (group size %d)\n",
+		cfg.QOut(), cfg.KVOut(), cfg.GroupSize())
 	fmt.Println("---------------")
+
+	logits := gpt.Forward(ids)
+
 	last := logits[len(logits)-1]
 	fmt.Println("Logits shape:", len(logits), "x", len(last))
+	fmt.Println(colHeader(previewDims))
+	fmt.Println(vecRow("logits", last, previewDims))
+	fmt.Println("---------------")
 
 	type cand struct {
 		id    int
@@ -73,9 +70,8 @@ func main() {
 	}
 	sort.Slice(cands, func(a, b int) bool { return cands[a].logit > cands[b].logit })
 
-	fmt.Println("Top 5 next-token predictions: ")
+	fmt.Println("Top 5 next-token predictions:")
 	for _, c := range cands[:5] {
 		fmt.Printf(" %6d %8.4f %q\n", c.id, c.logit, tok.Decode([]int{c.id}))
 	}
-
 }

@@ -1,17 +1,18 @@
 package model
 
-// New Random Linear creates a random intialized Linear Layer
-// Weight is (out, in) row major, matching reference of GPT-2
+// NewRandomLinear creates a randomly initialized Linear layer with no bias.
+// Weight is (out, in) row-major. Qwen3's attention and MLP projections are all
+// bias-free, so Bias stays nil — MatMul skips it.
 func NewRandomLinear(in, out int) Linear {
 	return Linear{
 		Weight: randFloats(in * out),
-		Bias:   make([]float32, out),
+		Bias:   nil,
 		In:     in,
 		Out:    out,
 	}
 }
 
-// MatMul projects x (T, in) through a Linear layers weights, computing
+// MatMul projects x (T, in) through a Linear layer's weights, computing
 // x @ W^T. Returns (T, out).
 func MatMul(x [][]float32, lin Linear) [][]float32 {
 	out := make([][]float32, len(x))
