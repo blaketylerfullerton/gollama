@@ -7,6 +7,21 @@ package model
 //
 // layer is the block index, or -1 for stages outside the block stack
 // (embeddings, final norm, logits).
+//
+// # Contract
+//
+// Implementations MUST NOT retain any slice past the call that delivered it.
+// The engine is free to hand over scratch buffers it intends to reuse, so a
+// retained slice may be overwritten at any point afterwards. Copy anything you
+// need to keep.
+//
+// This is deliberate. Buffer reuse is the largest allocation win available in
+// the forward pass, and pushing the copy onto the tracer costs nothing when
+// tracing is off — which is the normal case, since Trace is nil by default.
+//
+// Implementations do NOT need to be safe for concurrent use. Every call is made
+// from the goroutine running the forward pass. If the matmuls are ever
+// parallelized, emissions will stay on the serial path rather than fanning out.
 type Tracer interface {
 	// Stage reports the residual stream, or any (T, dim) matrix, after a step.
 	Stage(layer int, name string, x [][]float32)
@@ -20,12 +35,34 @@ type Tracer interface {
 	Note(layer int, format string, args ...any)
 }
 
+// LogitLensTracer is an optional extension. A Tracer that also implements it
+// receives, at every layer, the model's next-token distribution as it stands
+// *at that depth* — the residual stream run through the final norm and the LM
+// head early. Watching a prediction go from noise to certain across the stack is
+// the clearest window into what the layers are actually doing.
+//
+// It's opt-in by type assertion because it isn't free: one extra LM head
+// projection per layer, and the LM head is the largest matmul in the model. Only
+// the final position is projected, which keeps it to roughly one extra forward
+// pass worth of work overall.
+type LogitLensTracer interface {
+	Tracer
+	LogitLens(layer int, logits []float32)
+}
+
 // Trace is the handle threaded through the forward pass. A zero Trace (nil
 // Out) makes every method a no-op, so tracing costs one nil check per call
 // site and nothing else — tests and benchmarks leave it unset.
 type Trace struct {
 	Out   Tracer
 	Layer int
+}
+
+// lens returns the tracer as a LogitLensTracer, or nil if it doesn't want
+// intermediate predictions.
+func (t Trace) lens() LogitLensTracer {
+	l, _ := t.Out.(LogitLensTracer)
+	return l
 }
 
 // On reports whether anyone is listening. Guard expensive trace-only work with

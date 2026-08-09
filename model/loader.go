@@ -100,13 +100,23 @@ func LoadQwen3(cfg GPTConfig, st *Safetensors) (*GPT, error) {
 		}
 	}
 
-	// Tied embeddings: small Qwen3 models omit lm_head.weight entirely and
-	// reuse the embedding table. Trust the checkpoint over the config flag —
-	// if the tensor is absent, tying is the only option regardless.
+	// Tied embeddings: the LM head reuses the embedding table.
+	//
+	// The config flag wins over the checkpoint's contents here. Qwen3-0.6B
+	// declares tie_word_embeddings: true AND still ships an lm_head.weight
+	// tensor that is byte-for-byte identical to model.embed_tokens.weight.
+	// Loading it would cost a redundant 155.6M floats — 622MB widened to
+	// float32 — and HuggingFace itself ties the parameters at construction and
+	// ignores whatever is stored. So when the flag says tied, alias and don't
+	// even read the tensor.
 	var lmHead Linear
-	if st.Has("lm_head.weight") {
+	switch {
+	case cfg.TieEmbed:
+		lmHead = Linear{Weight: wte, In: cfg.NEmbed, Out: cfg.VocabSize}
+	case st.Has("lm_head.weight"):
 		lmHead = l.linear("lm_head.weight", cfg.VocabSize, cfg.NEmbed)
-	} else {
+	default:
+		// Neither a flag nor a tensor: tied by omission.
 		lmHead = Linear{Weight: wte, In: cfg.NEmbed, Out: cfg.VocabSize}
 	}
 

@@ -2,13 +2,18 @@
 <img src="https://i.postimg.cc/kg3gqwB1/Gemini-Generated-Image-bws52zbws52zbws5.png" alt="Go Llama" style="max-width: 600px; width: 100%;">
 </div>
 
-This repo started as a rewrite by (mostly) hand of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), but in Go. It has since moved to the **Qwen3** architecture so that real pretrained checkpoints will load.
+This repo started as a rewrite by (mostly) hand of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), but in Go. It has since moved to the **Qwen3** architecture, and it now runs real pretrained Qwen3-0.6B weights:
+
+```text
+prompt: "The capital of France is"
+output:  Paris, and
+```
 
 This is purely to help me understand inference and transformers better.
 
 Not optimal at all, just for learning. Meant to be a hackable, super simple project for understanding how LLM inference works from first principles.
 
-Inference only — no training (yet). Standard library only, no dependencies.
+Inference only — no training. **The engine has no dependencies**; only the inspector TUI pulls anything in (bubbletea and lipgloss, isolated under `cmd/inspect`).
 
 ## Running it
 
@@ -16,25 +21,127 @@ Inference only — no training (yet). Standard library only, no dependencies.
 go run .
 ```
 
-The forward pass narrates itself. `main.go` walks a prompt through every stage and prints the shapes, intermediate vectors, and attention weights as it goes.
+```text
+checkpoints/qwen3-0.6b
+28 layers · 16 q heads / 8 kv heads x 128 dims · 596M params
 
-The best bit is the attention grid, which makes causal masking obvious:
+prompt  "The capital of France is"
+5 tokens  The | _capital | _of | _France | _is
+
+next token
+   65.7%  " Paris"
+    2.8%  " located"
+    2.4%  " the"
+
+output  The capital of France is Paris, and
+
+prefill 2.587s · 3 tokens in 2.831s (944ms/token) · kv cache 224 KB/token
+```
+
+`-prompt` runs anything you like. With a checkpoint in `checkpoints/qwen3-0.6b` this is the real 0.6B model; without one it falls back to a tiny randomly initialized model, so a fresh clone still exercises every stage. To get the weights:
+
+```bash
+huggingface-cli download Qwen/Qwen3-0.6B --local-dir checkpoints/qwen3-0.6b
+```
+
+## The walkthrough
+
+```bash
+go run . -v
+```
+
+With `-v` the forward pass narrates itself — shapes, intermediate vectors, per-layer magnitudes, rotary tables and attention weights at every stage. None of it is printed by the model: it goes through the `Tracer` hook described below, and with no tracer attached the hooks are no-ops.
+
+The best bit is the attention grid, which makes causal masking obvious — and on real weights also shows the *attention sink*, where nearly every position dumps a large share of its attention onto token 0:
 
 ```text
 attention weights — layer 0, head 0 (each row attends across the columns)
-               Hello        ,   _world        . _Testing   _token  ization   _layer
-  Hello        1.000        ·        ·        ·        ·        ·        ·        ·
-  ,            0.630    0.370        ·        ·        ·        ·        ·        ·
-  _world       0.401    0.314    0.286        ·        ·        ·        ·        ·
-  .            0.098    0.096    0.126    0.680        ·        ·        ·        ·
-  _Testing     0.032    0.067    0.682    0.033    0.186        ·        ·        ·
-  _token       0.144    0.441    0.044    0.185    0.141    0.045        ·        ·
-  ization      0.112    0.624    0.112    0.017    0.014    0.020    0.100        ·
-  _layer       0.299    0.311    0.081    0.031    0.035    0.055    0.075    0.113
+                 The _capital      _of  _France      _is
+  The          1.000        ·        ·        ·        ·
+  _capital     0.872    0.128        ·        ·        ·
+  _of          0.382    0.001    0.617        ·        ·
+  _France      0.633    0.040    0.310    0.018        ·
+  _is          0.452    0.006    0.361    0.005    0.176
   · = masked. Each row sums to 1, and token 0 can only ever attend to itself
 ```
 
-`main.go` runs with random weights, so your numbers will differ and the predictions are meaningless — the mechanics are the point.
+## Inspecting a run
+
+```bash
+go run ./cmd/inspect
+```
+
+An interactive TUI: it loads the checkpoint once, then you **type a prompt and press enter**. It traces a prefill pass plus one pass per generated token, streaming each into the UI as it completes. Edit and run again with `i` — the model stays loaded.
+
+While you type, it shows the live tokenization, so you can see how the prompt will actually be split before running it:
+
+```text
+ > The sky is
+ 3 tokens: The|_sky|_is
+ enter to run · 2 tokens to generate (+/-)
+```
+
+Then, after the run:
+
+```text
+ "The sky is"  →  " blue,"
+ steps  prefill   _blue   ,
+```
+
+`n`/`p` step between generated tokens, so you can ask how the model arrived at each one separately.
+
+There's also a replay mode, for looking at a run after the fact or on a machine with no checkpoint:
+
+```bash
+go run . -trace run.jsonl           # record while the walkthrough runs
+go run ./cmd/inspect -f run.jsonl   # replay it
+```
+
+Both render identical data, because both go through `trace/`: the live collector and the file writer share their event constructors.
+
+The **logit lens** is the reason this exists. It projects the residual stream through the LM head at *every* layer, so you can watch an answer get found:
+
+```text
+  layer   prediction          prob
+  0       " only"            18.1%  ██████░░░░░░░░░░░░░░░░░░░░░░░░
+  4       " not"             54.6%  ██████████████████░░░░░░░░░░░░
+  7       " a"               54.8%  ██████████████████░░░░░░░░░░░░
+  12      " a"               20.7%  ███████░░░░░░░░░░░░░░░░░░░░░░░
+  17      "____"             76.6%  ██████████████████████████░░░░
+  21      "____"             45.1%  ███████████████░░░░░░░░░░░░░░░
+  22      " Paris"           55.1%  ██████████████████░░░░░░░░░░░░   ← first leads here
+  25      " Paris"           96.4%  ████████████████████████████████
+  27      " Paris"           65.7%  ██████████████████████░░░░░░░░
+  out     " Paris"           65.7%  ██████████████████████░░░░░░░░
+```
+
+Early layers guess generic function words. By layer 7 it knows a noun phrase is coming (`" a"`). Around 17 it's reaching for a blank (`"____"`). **" Paris" only takes the lead at layer 22 of 28**, then sharpens to 96% before the last layer hedges back down.
+
+The attention view shows the sink getting dramatic with depth — at layer 27, token 0 absorbs 94% of every later position's attention:
+
+```text
+  layer 27  head 0
+                 The _capital      _of  _France      _is
+  The          1.000        ·        ·        ·        ·
+  _capital     0.983    0.017        ·        ·        ·
+  _of          0.962    0.018    0.020        ·        ·
+  _France      0.971    0.002    0.009    0.018        ·
+  _is          0.862    0.005    0.010    0.027    0.095
+  token 0 absorbs 94% of later positions' attention on average
+```
+
+Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `g`/`G` first/last layer, `q` quit.
+
+Stepping between tokens is where it gets interesting. On `"The capital of France is"` the answer lands at layer 22. On the *next* token — after "…is Paris." — the model predicts `" The"`, and that one settles by layer 19. Different tokens are decided at different depths.
+
+Temperature is easier to believe when you can watch it work on a fact the model actually knows:
+
+```text
+  temperature 0.7        temperature 1.0        temperature 1.5
+   93.62%  " Paris"       65.69%  " Paris"       15.37%  " Paris"
+    1.02%  " located"      2.78%  " located"      1.87%  " located"
+    0.80%  " the"          2.35%  " the"          1.67%  " the"
+```
 
 ## How the printing works
 
@@ -49,7 +156,34 @@ type Tracer interface {
 }
 ```
 
-Set `gpt.Trace` and you get the walkthrough. Leave it nil — which is what tests and any real inference do — and every call is a no-op behind a single nil check. That way the pedagogy lives in `print.go` instead of being tangled through the forward pass, and things you can't see from outside a block (attention weights, pre/post-rotary vectors) are still reachable.
+Set `gpt.Trace` and you get the walkthrough. Leave it nil — which is what tests and any real inference do — and every call is a no-op behind a single nil check. That way the pedagogy lives outside the forward pass, and things you can't see from outside a block (attention weights, pre/post-rotary vectors) are still reachable.
+
+**The contract is that implementations must not retain slices past the call.** The engine is free to hand over scratch buffers it means to reuse, so anything you want to keep has to be copied. That's deliberate: buffer reuse is the largest allocation win left in the forward pass, and putting the copy on the tracer costs nothing when tracing is off. Implementations also don't need to be goroutine-safe — every call comes from the goroutine running the pass, and if the matmuls are ever parallelized, emissions will stay on the serial path.
+
+The logit lens is an opt-in extension, because it isn't free — one extra LM head projection per layer:
+
+```go
+type LogitLensTracer interface {
+	Tracer
+	LogitLens(layer int, logits []float32)
+}
+```
+
+The engine type-asserts for it, so a tracer that doesn't want intermediate predictions simply doesn't implement the method and never pays for them.
+
+### How the pieces are separated
+
+```text
+model/  ──Tracer──▶  print.go              terminal walkthrough
+                └─▶  trace/  ┬─ Writer  ──▶ JSONL file ─┐
+                             └─ Collector ── in memory ─┴─▶ cmd/inspect (TUI)
+```
+
+One rule holds it together: **`model/` imports neither `trace/` nor `cmd/`.** The interface lives in `model/` because that's where it's consumed; every implementation lives outside. `TestEngineHasNoThirdPartyDependencies` and `TestModelDoesNotImportPresentation` parse the import graph and fail if either invariant breaks.
+
+`Writer` and `Collector` share their event constructors, so a live view and a replayed file are looking at byte-identical data and the UI needs only one rendering path. Both copy every slice they keep, as the contract requires.
+
+The consequences are what make this worth the indirection: the UI is testable against hand-written fixtures with no checkpoint and no inference, it can be rewritten without touching the engine, and the optimization work can restructure the hot path freely as long as the trace format holds.
 
 ## Architecture
 
@@ -67,7 +201,7 @@ Qwen3, which is very close to Llama:
 
 **Causal attention** — scaled dot-product with a causal mask, so position `t` only attends to positions `≤ t`. Rather than building a full `T x T` score matrix and masking the upper triangle with `-inf`, the masked scores are simply never computed. Softmax subtracts the row max before exponentiating for numerical stability.
 
-**Tied embeddings** — small Qwen3 models omit `lm_head.weight` and reuse the embedding table. Detected from the checkpoint rather than trusting the config flag.
+**Tied embeddings** — the LM head reuses the embedding table. The `tie_word_embeddings` flag wins over the checkpoint's contents here, which is deliberate: Qwen3-0.6B sets the flag *and* still ships an `lm_head.weight` tensor that is byte-for-byte identical to `model.embed_tokens.weight`. Loading it would cost a redundant 155.6M floats (622MB widened to float32), and HuggingFace itself ties the parameters at construction and ignores whatever is stored.
 
 **No biases anywhere.** `Linear` supports them for other architectures, but Qwen3 doesn't use them.
 
@@ -85,13 +219,30 @@ Reads HuggingFace `config.json` for the architecture and `model.safetensors` for
 - **Sharded checkpoints** via `model.safetensors.index.json`.
 - **Shape assertions on every tensor**, with errors accumulated through `errors.Join` so one run reports every mismatch instead of failing on the first.
 
+Stop tokens come from `generation_config.json` when it's present, falling back to `config.json`. They disagree, and it matters: Qwen3-0.6B's `config.json` says `eos_token_id: 151645` while `generation_config.json` says `[151645, 151643]`. HuggingFace generates with the latter, so reading only `config.json` means never stopping on `<|endoftext|>`.
+
 No transposes needed anywhere: PyTorch `nn.Linear` already stores weights `(out, in)` row-major, which is exactly what `Linear.Weight` wants. (GPT-2's `Conv1D` stores them transposed, which is one of several reasons this targets Qwen3 instead.)
 
-To get a checkpoint:
+## The tokenizer
 
-```bash
-huggingface-cli download Qwen/Qwen3-0.6B --local-dir ./checkpoints/qwen3-0.6b
-```
+Byte-level BPE, loaded from a HuggingFace `tokenizer.json`. Three details the format demands:
+
+**Merges come in two shapes.** Older `tokenizer.json` files write them as space-separated strings (`"Ġ Ġ"`), newer ones as explicit pairs (`["Ġ","Ġ"]`). Qwen3 uses the newer form. Both load — the string form can't be parsed unambiguously when a token itself contains a space, which is presumably why they changed it.
+
+**`added_tokens` live outside `model.vocab`,** and their ids continue past it. Qwen3 has 151643 vocab entries (ids 0–151642) plus 26 special tokens at 151643–151668. Sizing the id table from `len(vocab)` drops all of them silently — they'd decode to `""`, so you'd never see `<|im_end|>`.
+
+**`VocabSize()` is not the model's `vocab_size`.** Checkpoints pad the embedding table for alignment: the tokenizer knows 151669 tokens while `config.json` declares 151936. The model can emit logits for ids that decode to nothing. Size embedding tables from config, not from the tokenizer.
+
+**The pretokenizer is hand-written, because RE2 can't do it.** `tokenizer.json` ships its own splitting regex, and Qwen3's uses negative lookahead (`\s+(?!\S)`) — which Go's `regexp` rejects by design, since it's RE2. So `splitQwen` in [pretokenize.go](tokenizer/pretokenize.go) implements that pattern's seven branches directly, including the backtracking the alternation depends on.
+
+`compilePretokenizer` recognises the pattern by string comparison and only claims exactness for the one actually implemented; anything else falls back and `PretokenizerIsExact()` reports `false`.
+
+Two rules do most of the work, and both surprise people:
+
+- **The optional character before a word is any non-letter non-digit**, not just a space. So `f(x)` splits as `f` + `(x` + `)`, and `a\tb` as `a` + `\tb` — the paren and the tab attach to the following word exactly the way a space does.
+- **`\s+(?!\S)` gives up its last character.** A run of two spaces before a word splits as `" "` + `" word"`, because the lookahead forces the whitespace branch to backtrack one character so the word branch can claim it. That single rule is why byte-level BPE vocabularies are full of `Ġword` entries.
+
+Verified by cross-checking against the pattern run through Python's `re` (with `\p{L}` and `\p{N}` translated to equivalent classes) over a 34-case corpus — every case matched, including the whole corpus as one blob with tabs, newlines, and unicode.
 
 ## Generating text
 
@@ -109,7 +260,24 @@ The sampling filters compose, and they're applied in this order: temperature div
 
 Stop tokens end the run and aren't included in the result. Both `opts.Stop` and the checkpoint's own `eos_token_id` are honored.
 
-One deliberate inefficiency: every step recomputes the entire prefix, which is `O(T²)` work over the run. The slow version comes first on purpose — it's the reference a KV cache has to reproduce exactly, and the baseline any speedup gets measured against.
+The prompt goes through in one **prefill** pass, then each new token is fed in on its own while the KV cache carries the history forward.
+
+## The KV cache
+
+```go
+cache := model.NewKVCache(gpt.Config)
+logits, err := gpt.ForwardCached(ids, cache) // appends ids, returns the last row
+```
+
+Only keys and values are cached, never queries. A query is used once, by the token that issued it, and then it's done — whereas every future token attends back over every past key and value. That asymmetry is the whole trick.
+
+Two savings. Keys and values for positions already stored aren't recomputed, so a decode step is `O(T)` work rather than `O(T²)`. And `ForwardCached` runs the LM head on one row instead of every row — at 155.6M parameters that's the largest matmul in the model, and only the final position's distribution is ever used.
+
+**The cache is deliberately not a field on `GPT`.** The model is just weights; the cache is per-conversation state. Keeping them separate means one loaded model can serve many independent generations at once. Pass a `Cache` in `GenerateOpts` to continue a previous run rather than reprocessing its history.
+
+**The bug to watch for is the position offset.** A cached token sits at absolute position `cache.Len()`, not 0, so it needs `cos[cache.Len()]`. Get it wrong and the model still runs and still emits fluent text — same silent failure mode as the rotary sign convention. `CausalAttention` takes an explicit `offset` for exactly this reason, and `GenerateOpts.NoCache` exists so the cached path can be diffed against the uncached one.
+
+Memory is `NLayer × NKVHead × HeadDim × 2 × 4` bytes per token. For Qwen3-0.6B that's **224KB per token**, or 9.4GB at the full 40960-token context — and 18.8GB without GQA, since `NKVHead` is half `NHead`. That division is what grouped-query attention buys you.
 
 ## Tests
 
@@ -117,34 +285,74 @@ One deliberate inefficiency: every step recomputes the entire prefix, which is `
 go test ./...
 ```
 
-The safetensors and loader tests build synthetic checkpoints on disk using real HuggingFace tensor names, over a tiny config that deliberately keeps `HeadDim != NEmbed/NHead` and `NKVHead < NHead` — so anything that wrongly derives head dim, or confuses query width with kv width, fails there rather than in a 600MB checkpoint.
+151 tests. `-short` skips the ones that read the 1.5GB checkpoint; all of those also skip cleanly when it's absent, so a fresh clone passes.
 
-`TestForwardIsCausal` is the one I'd point at: truncating the input must not change the logits for the positions that remain, because no position may attend to the future. It's the strongest correctness property available without a reference implementation to compare against.
+**The one that matters most is `TestRealCheckpointPredictsParis`.** It asserts that the real model, given `"The capital of France is"`, ranks `" Paris"` first with more than 40% probability. That single assertion covers the rotary sign convention, the QK-norm ordering, the GQA head mapping, and every weight transpose at once — because all of those failure modes produce a flat distribution over nonsense rather than an error. It's the difference between "the code runs" and "the math is right."
 
-The sampling tests check the distribution rather than just the range — draw 20000 times from a known set of probabilities and assert the observed frequencies match. There's also a test that `Generate` doesn't write into the caller's prompt slice, which the naive implementation passes only when the slice has no spare capacity.
+The unit tests build synthetic checkpoints on disk using real HuggingFace tensor names, over a tiny config that deliberately keeps `HeadDim != NEmbed/NHead` and `NKVHead < NHead` — so anything that wrongly derives head dim, or confuses query width with kv width, fails there rather than in a 600MB file.
+
+A few others worth naming:
+
+- `TestCachedMatchesUncachedIncrementally` — feeds tokens one at a time and compares against a full uncached pass over the same prefix at every step. Position drift compounds, so a late-position offset bug surfaces here even when positions 0 and 1 happen to agree. `TestRealCheckpointCachedMatchesUncached` does the same across 28 layers and the real rotary tables.
+- `TestForwardIsCausal` — truncating the input must not change the logits for the positions that remain, because no position may attend to the future. The strongest correctness property available without a reference implementation.
+- `TestLoaderRejectsWrongHeadDim` — feeds the loader the value `NEmbed/NHead` would have produced and confirms it fails loudly naming `q_proj`.
+- The sampling tests check the *distribution*, not just the range: 20000 draws against known probabilities.
+- `TestGenerateDoesNotMutatePrompt` — the naive implementation passes this only when the caller's slice has no spare capacity.
+- The tokenizer tests run against the real `tokenizer.json` as well as fixtures, to catch format drift in a file I don't control.
+- `TestWriterCopiesBeforeReturning` enforces the Tracer contract by scribbling `-999` over every slice right after handing it to the trace writer, then checking none of it reached the file. Without this, buffer reuse in the engine would silently corrupt traces.
+- `TestEngineHasNoThirdPartyDependencies` and `TestModelDoesNotImportPresentation` parse the import graph and fail if the engine ever grows a dependency or starts depending on something that consumes it.
+- The inspector's views are rendered at four terminal sizes, including 20x5, because off-by-one errors in layout code are invisible until someone resizes.
+
+## Speed
+
+Still slow, but no longer quadratic. On an M-series laptop, Qwen3-0.6B generating 8 tokens:
+
+```text
+cached:    5.322s     665ms/token
+uncached: 31.179s    3.897s/token     ← identical output
+speedup:   5.86x
+```
+
+The speedup grows with sequence length, since prefill cost is fixed and only the decode steps benefit. Per-operation:
+
+```text
+BenchmarkRealForward-10    2    2390730896 ns/op   uncached, 5 tokens
+BenchmarkRealDecode-10     2     483599854 ns/op   one cached decode step
+```
+
+484ms per token is still ~1.5 tokens/sec, which is bad. The remaining problem is arithmetic throughput, not algorithms — roughly 2.5 GFLOP/s, maybe 10× off what a tuned single-threaded loop should manage. Next in order of payoff:
+
+1. **Flat `[]float32` with explicit strides** instead of `[][]float32`, which is a pointer chase per row.
+2. **Parallel matmul** across output rows.
+3. **Quantized weights**, so bfloat16 stops being widened to float32 on load.
 
 ## Not implemented yet
 
-- **KV cache** — every generation step currently recomputes the whole prefix. Once it exists, it has to produce logits identical to the uncached path.
-- **A Qwen3-compatible tokenizer.** The current one is GPT-2 shaped. The pretokenizer regex in `tokenizer.json` uses negative lookahead (`\s+(?!\S)`), which Go's stdlib `regexp` (RE2) cannot compile by design, so this needs a hand-written splitter.
-- **Performance.** Nothing is optimized. `[][]float32` is a pointer chase per row, matmul is a naive triple loop, and weights are widened to float32 on load.
-- **Verification against a reference.** No golden-logits test yet, so the rotary sign convention and QK-norm ordering are reasoned from the HuggingFace source rather than proven.
+- **Batching.** One sequence at a time. Continuous batching across concurrent requests is the next architectural step after the tensor layout work — the cache being separate from `GPT` is what leaves room for it.
+- **Chat templates.** `added_tokens` are loaded and decode correctly, but `Encode` doesn't yet split special tokens out of input text, so `<|im_start|>` in a prompt gets byte-level encoded rather than mapped to its id.
+- **Performance.** See above. Nothing is optimized.
+- **Exact numeric verification.** The `" Paris"` test proves the architecture is right in every way that changes the ranking, but a small error — a misplaced epsilon, say — could still shift logits slightly without being caught. A golden-logits comparison against `transformers` would close that gap.
 
 Despite the name, it doesn't run Llama yet — but it's close. Llama needs optional QK-norm (it has none) and RoPE scaling for 3.1+. Everything else is already config-driven.
 
 ## Layout
 
 ```text
-main.go              walks a prompt through every stage, printing as it goes
+main.go              loads a checkpoint (or a random model) and walks a prompt
+                     through every stage, printing as it goes
 print.go             the walkthrough Tracer, plus vector/matrix pretty-printers
-tokenizer/           byte-level BPE encode/decode, loads a tokenizer.json
+tracers.go           fans trace events out to several consumers at once
+tokenizer/           byte-level BPE, hand-written pretokenizer, tokenizer.json
+trace/               the trace format: events, JSONL writer, in-memory collector
+cmd/inspect/         interactive TUI: type a prompt, run it, inspect the trace
 model/
   config.go          GPTConfig + HuggingFace config.json loader + validation
   safetensors.go     .safetensors reader, F32/BF16/F16, sharded checkpoints
   loader.go          maps Qwen3 tensor names onto the structs
   trace.go           the Tracer hook the forward pass narrates through
-  gpt.go             the model, the full forward pass, rotary table management
-  generate.go        the autoregressive loop, stop tokens, streaming
+  gpt.go             the model, both forward paths, rotary table management
+  kvcache.go         cached keys and values, and what they cost per token
+  generate.go        prefill + decode loop, stop tokens, streaming
   sample.go          greedy / temperature / top-k / top-p sampling
   block.go           one transformer layer: pre-norm attention + pre-norm MLP
   attention.go       grouped-query attention, causal attention, softmax

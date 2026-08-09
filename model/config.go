@@ -76,7 +76,25 @@ func ConfigFromDirectory(dir string) (GPTConfig, error) {
 	if err != nil {
 		return GPTConfig{}, fmt.Errorf("reading %q: %w", path, err)
 	}
-	return ConfigFromJSON(data)
+	cfg, err := ConfigFromJSON(data)
+	if err != nil {
+		return cfg, err
+	}
+
+	// generation_config.json holds the authoritative stop-token list, and it
+	// can disagree with config.json. Qwen3-0.6B's config.json says
+	// eos_token_id 151645, but generation_config.json says [151645, 151643] —
+	// HuggingFace generates with the latter, so reading only config.json means
+	// never stopping on <|endoftext|>.
+	if gen, err := os.ReadFile(filepath.Join(dir, "generation_config.json")); err == nil {
+		var g struct {
+			EOSTokenID tokenIDs `json:"eos_token_id"`
+		}
+		if err := json.Unmarshal(gen, &g); err == nil && len(g.EOSTokenID) > 0 {
+			cfg.EOSTokenIDs = g.EOSTokenID
+		}
+	}
+	return cfg, nil
 }
 
 func ConfigFromJSON(data []byte) (GPTConfig, error) {

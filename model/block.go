@@ -10,23 +10,23 @@ type Block struct {
 	MLP          MLP
 }
 
-func (b *Block) Forward(x [][]float32, cos, sin [][]float32, tr Trace) [][]float32 {
+func (b *Block) Forward(x [][]float32, p *pass) [][]float32 {
 	normed := b.InputNorm.Forward(x)
-	tr.Stage("input norm", normed)
+	p.tr.Stage("input norm", normed)
 
-	attnOut, weights := b.Attn.Forward(normed, cos, sin, tr)
+	attnOut, weights := b.Attn.Forward(normed, p)
 	for h, w := range weights {
-		tr.Attention(h, w)
+		p.tr.Attention(h, w)
 	}
 	// The residual is added onto the *unnormalized* x — pre-norm means the
 	// residual stream itself is never rescaled, which is why its magnitude
 	// grows as layers stack.
 	x = Add(x, attnOut)
-	tr.Stage("+ attention residual", x)
+	p.tr.Stage("+ attention residual", x)
 
-	mlpOut := b.MLP.Forward(b.PostAttnNorm.Forward(x), tr)
+	mlpOut := b.MLP.Forward(b.PostAttnNorm.Forward(x), p.tr)
 	x = Add(x, mlpOut)
-	tr.Stage("+ mlp residual", x)
+	p.tr.Stage("+ mlp residual", x)
 	return x
 }
 

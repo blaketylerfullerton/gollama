@@ -14,15 +14,19 @@ type GenerateOpts struct {
 	// OnToken, when set, is called with each token as it is produced — enough
 	// to stream output instead of waiting for the whole completion.
 	OnToken func(id int)
+	// Cache lets a caller supply (and afterwards inspect) the KV cache, or
+	// continue a previous run. When nil a fresh one is allocated per call.
+	Cache *KVCache
+	// NoCache forces the O(T²) uncached path, recomputing the whole prefix on
+	// every step. Only useful for checking the cached path against it.
+	NoCache bool
 }
 
 // Generate autoregressively continues the prompt and returns the new tokens.
 // Stop tokens end the run and are not included in the result.
 //
-// This recomputes the entire prefix on every step, which is O(T^2) work over
-// the run. That is deliberately the simple version: it is the reference a KV
-// cache has to reproduce exactly, and the baseline any speedup is measured
-// against. Don't optimize it here — add the cache as a separate path.
+// The prompt is processed in a single prefill pass, then each new token is fed
+// in on its own with the cache carrying the history forward.
 func (g *GPT) Generate(prompt []int, opts GenerateOpts) ([]int, error) {
 	if len(prompt) == 0 {
 		return nil, fmt.Errorf("generate: prompt is empty, there is nothing to continue")
@@ -37,6 +41,13 @@ func (g *GPT) Generate(prompt []int, opts GenerateOpts) ([]int, error) {
 		}
 	}
 
+	// The prompt plus everything generated has to fit the context window.
+	budget := opts.MaxTokens
+	if g.Config.SequenceLen > 0 {
+		room := max(0, g.Config.SequenceLen-len(prompt))
+		budget = min(budget, room)
+	}
+
 	stop := make(map[int]bool, len(opts.Stop)+len(g.Config.EOSTokenIDs))
 	for _, id := range opts.Stop {
 		stop[id] = true
@@ -46,23 +57,61 @@ func (g *GPT) Generate(prompt []int, opts GenerateOpts) ([]int, error) {
 	}
 
 	sampler := NewSampler(opts.SampleOpts)
+	out := make([]int, 0, budget)
 
-	// Copy so appending never writes into the caller's backing array.
-	seq := make([]int, len(prompt), len(prompt)+opts.MaxTokens)
-	copy(seq, prompt)
+	if opts.NoCache {
+		return g.generateUncached(prompt, budget, stop, sampler, opts, out)
+	}
 
-	out := make([]int, 0, opts.MaxTokens)
-	for len(out) < opts.MaxTokens {
-		if g.Config.SequenceLen > 0 && len(seq) >= g.Config.SequenceLen {
-			break // out of context
+	cache := opts.Cache
+	if cache == nil {
+		cache = NewKVCache(g.Config)
+	}
+
+	// Prefill: the whole prompt in one pass, which fills the cache and yields
+	// the distribution for the first new token.
+	logits, err := g.ForwardCached(prompt, cache)
+	if err != nil {
+		return nil, err
+	}
+
+	for len(out) < budget {
+		next := sampler.Sample(logits)
+		if stop[next] {
+			break
+		}
+		out = append(out, next)
+		if opts.OnToken != nil {
+			opts.OnToken(next)
+		}
+		if len(out) == budget {
+			break // don't pay for a forward pass whose logits we'd discard
 		}
 
+		// Decode: one token in, and the cache supplies every key and value
+		// behind it.
+		logits, err = g.ForwardCached([]int{next}, cache)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// generateUncached recomputes the entire prefix on every step. It exists as the
+// reference the cached path is verified against — nothing else should use it.
+func (g *GPT) generateUncached(prompt []int, budget int, stop map[int]bool,
+	sampler *Sampler, opts GenerateOpts, out []int) ([]int, error) {
+
+	seq := make([]int, len(prompt), len(prompt)+budget)
+	copy(seq, prompt)
+
+	for len(out) < budget {
 		logits := g.Forward(seq)
 		next := sampler.Sample(logits[len(logits)-1])
 		if stop[next] {
 			break
 		}
-
 		seq = append(seq, next)
 		out = append(out, next)
 		if opts.OnToken != nil {

@@ -1,42 +1,257 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/trace"
 )
 
+// checkpointDir is where a real Qwen3 checkpoint is expected:
+//
+//	huggingface-cli download Qwen/Qwen3-0.6B --local-dir checkpoints/qwen3-0.6b
+//
+// When it's missing, main falls back to a tiny randomly initialized model so
+// `go run .` still demonstrates every stage on a fresh clone.
+const checkpointDir = "checkpoints/qwen3-0.6b"
+
+// session is whichever model we managed to put together, plus a prompt to run
+// through it.
+type session struct {
+	gpt    *model.GPT
+	tok    *tokenizer.Tokenizer
+	ids    []int
+	prompt string
+	real   bool
+	// maxNewTokens stays small for the real model: at 0.6B with a naive matmul
+	// each token is most of a second.
+	maxNewTokens int
+}
+
 func main() {
+	verbose := flag.Bool("v", false, "print the full layer-by-layer walkthrough")
+	prompt := flag.String("prompt", "The capital of France is", "prompt to run through the model")
+	tracePath := flag.String("trace", "", "write a trace of the forward pass to this file")
+	flag.Parse()
+
+	s, err := setup(*prompt)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+		os.Exit(1)
+	}
+	if err := run(s, *verbose, *tracePath); err != nil {
+		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run(s *session, verbose bool, tracePath string) error {
+	cfg := s.gpt.Config
+	labels := make([]string, len(s.ids))
+	for i, id := range s.ids {
+		labels[i] = s.tok.Decode([]int{id})
+	}
+
+	// --- what we're running -------------------------------------------------
+	if s.real {
+		fmt.Printf("%s\n", checkpointDir)
+	} else {
+		fmt.Printf("no checkpoint at %s — using a tiny random model, so the numbers are noise\n"+
+			"  huggingface-cli download Qwen/Qwen3-0.6B --local-dir %s\n", checkpointDir, checkpointDir)
+	}
+	fmt.Printf("%d layers · %d q heads / %d kv heads x %d dims · %s params\n",
+		cfg.NLayer, cfg.NHead, cfg.NKVHead, cfg.HeadDim, count(paramTotal(cfg)))
+
+	// --- tokenization -------------------------------------------------------
+	fmt.Printf("\nprompt  %q\n", s.prompt)
+	fmt.Printf("%d tokens  %s\n", len(s.ids), strings.Join(visible(labels), " | "))
+	if !s.tok.PretokenizerIsExact() {
+		fmt.Println("  (this tokenizer's pretokenizer pattern isn't one we recognise, so the" +
+			" splits are approximate)")
+	}
+
+	// A tracer is only attached when someone is going to read the output. With
+	// none, every hook in the forward pass is a no-op behind one nil check.
+	var walk *walkthrough
+	tracers := []model.Tracer{}
+	if verbose {
+		walk = &walkthrough{labels: labels, detailLayer: 0, detailHead: 0}
+		tracers = append(tracers, walk)
+	}
+	traceWriter, closeTrace, err := openTrace(tracePath, s, labels)
+	if err != nil {
+		return err
+	}
+	defer closeTrace()
+	if traceWriter != nil {
+		tracers = append(tracers, traceWriter)
+	}
+	s.gpt.Trace = tracerFor(tracers...)
+
+	// --- the forward pass ---------------------------------------------------
+	if verbose {
+		fmt.Println(rule("forward pass, full detail for layer 0 head 0"))
+	}
+	start := time.Now()
+	last, err := s.prefill()
+	if err != nil {
+		return err
+	}
+	prefillTime := time.Since(start)
+
+	if verbose {
+		fmt.Println(rule("where the parameters live"))
+		printParamSplit(cfg)
+
+		fmt.Println(rule("rotary position tables"))
+		cos, sin := s.gpt.RotaryTables()
+		PrintRotaryTable(cos, sin, 2)
+
+		fmt.Println(rule("stage magnitudes (mean ‖x‖ over tokens)"))
+		walk.PrintSummary()
+	}
+
+	// --- what it predicts ---------------------------------------------------
+	fmt.Printf("\nnext token\n")
+	for _, c := range model.TopCandidates(last, 1.0, 5) {
+		fmt.Printf("  %5.1f%%  %q\n", 100*c.Prob, s.tok.Decode([]int{c.ID}))
+	}
+	if verbose {
+		printTemperatures(s, last)
+	}
+
+	if traceWriter != nil {
+		// Record the real output as one more lens readout, past the last block,
+		// so the inspector has a row to compare intermediate layers against.
+		traceWriter.LogitLens(cfg.NLayer, last)
+	}
+
+	// --- generation ---------------------------------------------------------
+	// Tracing comes off first, or it fires again for every generated token.
+	s.gpt.Trace = nil
+
+	// The prompt is printed unquoted so the streamed continuation reads on from
+	// it as one sentence.
+	fmt.Printf("\noutput  %s", s.prompt)
+	genStart := time.Now()
+	out, err := s.gpt.Generate(s.ids, model.GenerateOpts{
+		MaxTokens:  s.maxNewTokens,
+		SampleOpts: model.SampleOpts{Temperature: 0.7, TopK: 20, TopP: 0.95, Seed: 1},
+		OnToken:    func(id int) { fmt.Print(s.tok.DecodeSkipSpecial([]int{id})) },
+	})
+	if err != nil {
+		return err
+	}
+	genTime := time.Since(genStart)
+
+	cache := model.NewKVCache(cfg)
+	fmt.Printf("\n\nprefill %v · %d tokens in %v (%v/token) · kv cache %d KB/token\n",
+		prefillTime.Round(time.Millisecond), len(out), genTime.Round(time.Millisecond),
+		perToken(genTime, len(out)), cache.BytesPerToken()/1024)
+
+	if traceWriter != nil {
+		fmt.Printf("\nwrote %d trace events to %s\n", traceWriter.Events(), tracePath)
+	}
+	if !verbose {
+		fmt.Println("\n-v for the layer-by-layer walkthrough · " +
+			"go run ./cmd/inspect to explore interactively")
+	}
+	return nil
+}
+
+// prefill runs the prompt through the model and returns the final position's
+// logits.
+//
+// It uses the cached path, which projects only the last row through the LM head
+// instead of all of them. The uncached Forward is still used when tracing, since
+// the walkthrough wants every position's intermediates.
+func (s *session) prefill() ([]float32, error) {
+	if s.gpt.Trace != nil {
+		logits := s.gpt.Forward(s.ids)
+		return logits[len(logits)-1], nil
+	}
+	return s.gpt.ForwardCached(s.ids, model.NewKVCache(s.gpt.Config))
+}
+
+func printTemperatures(s *session, last []float32) {
+	fmt.Println(rule("temperature"))
+	fmt.Println("Temperature divides the logits before softmax, so it changes how peaked the")
+	fmt.Println("distribution is — it can never reorder the candidates.")
+	for _, temp := range []float64{0.7, 1.0, 1.5} {
+		fmt.Printf("\n  temperature %.1f\n", temp)
+		for _, c := range model.TopCandidates(last, temp, 3) {
+			fmt.Printf("    %6.2f%%  %q\n", 100*c.Prob, s.tok.Decode([]int{c.ID}))
+		}
+	}
+}
+
+// openTrace returns a trace writer plus a close function, or nils when no path
+// was given. The writer also implements LogitLensTracer, which makes the engine
+// project the residual stream through the LM head at every layer — so it only
+// happens when something will read the result.
+func openTrace(path string, s *session, labels []string) (*trace.Writer, func(), error) {
+	if path == "" {
+		return nil, func() {}, nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	w, err := trace.NewWriter(f, traceHeader(s, labels), trace.Opts{
+		Vocab: func(id int) string { return s.tok.Decode([]int{id}) },
+	})
+	if err != nil {
+		f.Close()
+		return nil, func() {}, err
+	}
+	return w, func() {
+		w.Close()
+		f.Close()
+	}, nil
+}
+
+// --- setup ------------------------------------------------------------------
+
+func setup(prompt string) (*session, error) {
+	if _, err := os.Stat(filepath.Join(checkpointDir, "model.safetensors")); err == nil {
+		return setupReal(prompt)
+	}
+	return setupDemo(prompt)
+}
+
+func setupReal(prompt string) (*session, error) {
+	tok, err := tokenizer.FromDirectory(checkpointDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading tokenizer: %w", err)
+	}
+	gpt, err := model.FromDirectory(checkpointDir)
+	if err != nil {
+		return nil, fmt.Errorf("loading model: %w", err)
+	}
+	ids, err := encode(tok, prompt)
+	if err != nil {
+		return nil, err
+	}
+	return &session{gpt: gpt, tok: tok, ids: ids, prompt: prompt,
+		real: true, maxNewTokens: 3}, nil
+}
+
+func setupDemo(prompt string) (*session, error) {
 	tok, err := tokenizer.FromDirectory("tokenizer/testdata")
 	if err != nil {
-		panic(err)
+		return nil, fmt.Errorf("loading tokenizer: %w", err)
 	}
 
-	text := "Hello, world. Testing tokenization layer"
-	ids := tok.Encode(text)
-
-	// --- 1. tokenization ----------------------------------------------------
-	// Byte-level BPE splits text into subwords, then looks each one up. Printing
-	// them one per line is the only way to see where the splits actually land.
-	section("1. tokenization")
-	fmt.Printf("input: %q\n\n", text)
-	fmt.Printf("  %-4s %-8s %s\n", "#", "id", "token")
-	labels := make([]string, len(ids))
-	for i, id := range ids {
-		labels[i] = tok.Decode([]int{id})
-		fmt.Printf("  %-4d %-8d %q\n", i, id, labels[i])
-	}
-	fmt.Printf("\n%d tokens. Round-trip decode: %q\n", len(ids), tok.Decode(ids))
-
-	// --- 2. the model shape -------------------------------------------------
-	// A tiny Qwen3-shaped config. Two properties are inherited from the real
-	// Qwen3-0.6B on purpose:
-	//   HeadDim (16) is NOT NEmbed/NHead (32/4 = 8)
-	//   NKVHead (2) < NHead (4), so query heads share kv heads
-	// Weights are random, so the predictions are meaningless — the shapes and
-	// the mechanics are the point.
-	cfg := model.GPTConfig{
+	// Qwen3-shaped but tiny. Two properties are inherited from the real
+	// Qwen3-0.6B deliberately: HeadDim is not NEmbed/NHead, and NKVHead <
+	// NHead. So the shapes exercised here are the ones a real checkpoint hits.
+	gpt, err := model.NewRandomGPT(model.GPTConfig{
 		VocabSize:    tok.VocabSize(),
 		NLayer:       2,
 		NHead:        4,
@@ -48,145 +263,126 @@ func main() {
 		NormEps:      1e-6,
 		TieEmbed:     true,
 		SequenceLen:  512,
-	}
-
-	section("2. model shape")
-	fmt.Printf("%d layers, %d embedding dims, vocab %d\n", cfg.NLayer, cfg.NEmbed, cfg.VocabSize)
-	fmt.Printf("%d query heads / %d kv heads x %d head dims\n", cfg.NHead, cfg.NKVHead, cfg.HeadDim)
-	fmt.Printf("  q projects to %d wide, k and v only to %d\n", cfg.QOut(), cfg.KVOut())
-	fmt.Printf("  grouped-query attention: %d query heads share each kv head,\n", cfg.GroupSize())
-	fmt.Printf("  so the KV cache is %dx smaller than it would be otherwise\n", cfg.GroupSize())
-	fmt.Printf("  note HeadDim=%d, which is NOT NEmbed/NHead=%d — Qwen3 sets it explicitly\n",
-		cfg.HeadDim, cfg.NEmbed/cfg.NHead)
-	fmt.Println()
-	printParams(cfg)
-
-	gpt, err := model.NewRandomGPT(cfg)
-	if err != nil {
-		panic(err)
-	}
-
-	// --- 3. the forward pass ------------------------------------------------
-	// Everything below this line is printed by the model itself, via the Tracer
-	// hook. Forward calls into it at each stage; without a Tracer set it stays
-	// completely silent, which is how the tests and any real inference run it.
-	trace := &walkthrough{labels: labels, detailLayer: 0, detailHead: 0}
-	gpt.Trace = trace
-
-	section("3. forward pass (detail for layer 0, head 0)")
-	logits := gpt.Forward(ids)
-
-	// --- 4. positional encoding ---------------------------------------------
-	// Built lazily during Forward, so this has to come after it.
-	section("4. rotary position tables")
-	cos, sin := gpt.RotaryTables()
-	PrintRotaryTable(cos, sin, 3)
-
-	// --- 5. summary ---------------------------------------------------------
-	section("5. stage magnitudes (mean ‖x‖ over tokens)")
-	trace.PrintSummary()
-
-	// --- 6. sampling --------------------------------------------------------
-	// Logits are unbounded scores. Softmax turns the last row into a
-	// distribution, and temperature decides how peaked that distribution is.
-	section("6. next-token distribution")
-	last := logits[len(logits)-1]
-	fmt.Printf("predicting the token after %q, over a vocab of %d\n", labels[len(labels)-1], cfg.VocabSize)
-	for _, temp := range []float64{0.7, 1.0, 1.5} {
-		fmt.Printf("\n  temperature %.1f\n", temp)
-		fmt.Printf("    %6s  %10s  %14s  %s\n", "id", "p(token)", "share of top 5", "token")
-		cands := model.TopCandidates(last, temp, 5)
-		var top float64
-		for _, c := range cands {
-			top += c.Prob
-		}
-		for _, c := range cands {
-			fmt.Printf("    %6d  %9.4f%%  %13.1f%%  %q\n",
-				c.ID, 100*c.Prob, 100*c.Prob/top, tok.Decode([]int{c.ID}))
-		}
-	}
-	fmt.Println("\n  Temperature divides the logits before softmax, so it only changes how")
-	fmt.Println("  peaked the distribution is — it can never reorder the candidates.")
-	fmt.Printf("  Weights are random here, so all %d tokens sit near 1/%d ≈ %.4f%%.\n",
-		cfg.VocabSize, cfg.VocabSize, 100/float64(cfg.VocabSize))
-	fmt.Println("  Watch the share-of-top-5 column instead: that is where temperature shows.")
-
-	// --- 7. generation -----------------------------------------------------
-	// Generation calls Forward once per token, so the walkthrough has to come
-	// off first — otherwise it prints the entire trace twelve more times.
-	// Setting Trace back to nil is all it takes to go quiet.
-	gpt.Trace = nil
-
-	section("7. generating tokens")
-	fmt.Println("Each step samples from the last logit row, appends that token, and re-runs")
-	fmt.Println("the whole forward pass. That's O(T²) work over the run, which is exactly")
-	fmt.Println("what a KV cache exists to fix — but the slow version comes first, because")
-	fmt.Println("it's the reference the cached version has to reproduce.")
-	fmt.Printf("\nprompt: %q\n", text)
-	fmt.Print("output: ")
-
-	out, err := gpt.Generate(ids, model.GenerateOpts{
-		MaxTokens: 12,
-		SampleOpts: model.SampleOpts{
-			Temperature: 0.8,
-			TopK:        40,
-			TopP:        0.95,
-			Seed:        1,
-		},
-		OnToken: func(id int) { fmt.Print(tok.Decode([]int{id})) },
 	})
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
-	fmt.Printf("\n\n%d tokens: %v\n", len(out), out)
-	fmt.Println("(random weights, so the text is noise — the loop itself is real)")
-
-	section("next up")
-	fmt.Println("  - load real Qwen3 weights with model.FromDirectory")
-	fmt.Println("  - a Qwen3-compatible tokenizer (this one is still GPT-2 shaped)")
-	fmt.Println("  - a KV cache, verified against the slow path above")
+	ids, err := encode(tok, prompt)
+	if err != nil {
+		return nil, err
+	}
+	return &session{gpt: gpt, tok: tok, ids: ids, prompt: prompt,
+		real: false, maxNewTokens: 12}, nil
 }
 
-func section(title string) {
-	fmt.Printf("\n\n=== %s ===\n\n", title)
+// encode tokenizes and checks the result round-trips, which catches a
+// vocabulary mismatch straight away rather than as strange output later.
+func encode(tok *tokenizer.Tokenizer, prompt string) ([]int, error) {
+	ids := tok.Encode(prompt)
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("prompt %q produced no tokens", prompt)
+	}
+	if got := tok.Decode(ids); got != prompt {
+		return nil, fmt.Errorf("prompt does not round-trip: gave %q, got back %q", prompt, got)
+	}
+	return ids, nil
 }
 
-// printParams breaks the parameter count down by where it lives. At small
-// scale the embedding table dominates everything else, which surprises people.
-func printParams(cfg model.GPTConfig) {
-	type group struct {
-		name string
-		n    int
+// traceHeader records what was run, so an inspector needs neither the model nor
+// a tokenizer to make sense of the file.
+func traceHeader(s *session, labels []string) trace.Header {
+	cfg := s.gpt.Config
+	tokens := make([]trace.Token, len(s.ids))
+	for i, id := range s.ids {
+		tokens[i] = trace.Token{ID: id, Text: labels[i]}
 	}
+	name := "random model (no checkpoint)"
+	if s.real {
+		name = checkpointDir
+	}
+	return trace.Header{
+		Model:  name,
+		Prompt: s.prompt,
+		Tokens: tokens,
+		Config: trace.ModelInfo{
+			NLayer: cfg.NLayer, NEmbed: cfg.NEmbed,
+			NHead: cfg.NHead, NKVHead: cfg.NKVHead,
+			HeadDim: cfg.HeadDim, VocabSize: cfg.VocabSize,
+		},
+	}
+}
 
-	attnPerLayer := cfg.NEmbed*cfg.QOut() + // q
+// --- formatting -------------------------------------------------------------
+
+func rule(title string) string {
+	return fmt.Sprintf("\n─── %s %s", title, strings.Repeat("─", max(0, 68-len(title))))
+}
+
+// visible makes a token's leading space apparent, since it's significant and
+// otherwise invisible in a pipe-separated list.
+func visible(labels []string) []string {
+	out := make([]string, len(labels))
+	for i, l := range labels {
+		out[i] = sanitize(l)
+	}
+	return out
+}
+
+// paramTotal counts the model's parameters. The split is worth knowing: at 0.6B
+// the MLPs dominate, but the embedding table is still a quarter of the model
+// because the vocabulary is so large.
+func paramTotal(cfg model.GPTConfig) int {
+	perLayer := cfg.NEmbed*cfg.QOut() + // q
 		2*cfg.NEmbed*cfg.KVOut() + // k, v
 		cfg.QOut()*cfg.NEmbed + // output projection
-		2*cfg.HeadDim // q_norm, k_norm
-	mlpPerLayer := 3 * cfg.NEmbed * cfg.Intermediate // gate, up, down
-	normsPerLayer := 2 * cfg.NEmbed                  // input_layernorm, post_attention_layernorm
+		2*cfg.HeadDim + // q_norm, k_norm
+		3*cfg.NEmbed*cfg.Intermediate + // gate, up, down
+		2*cfg.NEmbed // input + post-attention norms
 
-	groups := []group{
-		{"embeddings", cfg.VocabSize * cfg.NEmbed},
-		{"attention (all layers)", cfg.NLayer * attnPerLayer},
-		{"mlp (all layers)", cfg.NLayer * mlpPerLayer},
-		{"norms", cfg.NLayer*normsPerLayer + cfg.NEmbed},
-	}
+	total := cfg.VocabSize*cfg.NEmbed + cfg.NLayer*perLayer + cfg.NEmbed
 	if !cfg.TieEmbed {
-		groups = append(groups, group{"lm head", cfg.VocabSize * cfg.NEmbed})
+		total += cfg.VocabSize * cfg.NEmbed
 	}
+	return total
+}
 
-	var total int
-	for _, g := range groups {
-		total += g.n
-	}
+// printParamSplit shows which parts of the model hold the weights. People are
+// usually surprised that the embedding table is a quarter of a 0.6B model.
+func printParamSplit(cfg model.GPTConfig) {
+	attn := cfg.NLayer * (cfg.NEmbed*cfg.QOut() + 2*cfg.NEmbed*cfg.KVOut() +
+		cfg.QOut()*cfg.NEmbed + 2*cfg.HeadDim)
+	mlp := cfg.NLayer * 3 * cfg.NEmbed * cfg.Intermediate
+	embed := cfg.VocabSize * cfg.NEmbed
+	norms := cfg.NLayer*2*cfg.NEmbed + cfg.NEmbed
+	total := paramTotal(cfg)
 
-	fmt.Println("parameters")
-	for _, g := range groups {
-		fmt.Printf("  %-24s %10d  %5.1f%%\n", g.name, g.n, 100*float64(g.n)/float64(total))
+	for _, g := range []struct {
+		name string
+		n    int
+	}{{"mlp", mlp}, {"attention", attn}, {"embeddings", embed}, {"norms", norms}} {
+		fmt.Printf("  %-12s %12d  %5.1f%%\n", g.name, g.n, 100*float64(g.n)/float64(total))
 	}
-	fmt.Printf("  %-24s %10d\n", "total", total)
+	fmt.Printf("  %-12s %12d\n", "total", total)
 	if cfg.TieEmbed {
-		fmt.Println("  (embeddings are tied: the lm head reuses this table instead of its own)")
+		fmt.Println("  embeddings are tied: the lm head reuses that table, no second copy")
 	}
+}
+
+func count(n int) string {
+	switch {
+	case n >= 1e9:
+		return fmt.Sprintf("%.1fB", float64(n)/1e9)
+	case n >= 1e6:
+		return fmt.Sprintf("%dM", n/1e6)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// perToken formats an average, guarding against a run that produced nothing.
+func perToken(d time.Duration, n int) time.Duration {
+	if n == 0 {
+		return 0
+	}
+	return (d / time.Duration(n)).Round(time.Millisecond)
 }

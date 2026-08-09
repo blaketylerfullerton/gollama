@@ -1,6 +1,9 @@
 package model
 
-import "math"
+import (
+	"fmt"
+	"math"
+)
 
 // Attention is one grouped-query attention layer. Under GQA the q projection
 // is NHead*HeadDim wide but k and v are only NKVHead*HeadDim — several query
@@ -17,23 +20,35 @@ type Attention struct {
 // CausalAttention computes single-head scaled dot product attention with a
 // causal mask. q and k are expected to be already normed and rotated; v is raw.
 //
-// All three are (T, HeadDim). Returns (T, HeadDim) — one output vector per
-// position, each a weighted average of the value vectors at or before it.
-func CausalAttention(q, k, v [][]float32) (out [][]float32, weights [][]float32) {
-	T := len(q)
+// q is (Tq, HeadDim) covering absolute positions offset..offset+Tq-1, while k
+// and v cover absolute positions 0..len(k)-1. During generation Tq is 1 and k
+// holds the whole history, so offset is what tells a lone query where it sits
+// in the sequence.
+//
+// Returns (Tq, HeadDim) — one output vector per query, each a weighted average
+// of the value vectors at or before its position.
+func CausalAttention(q, k, v [][]float32, offset int) (out [][]float32, weights [][]float32) {
+	Tq := len(q)
 	headDim := len(q[0])
 	scale := float32(1.0 / math.Sqrt(float64(headDim)))
 
-	out = make([][]float32, T)
-	weights = make([][]float32, T)
+	if want := offset + Tq; len(k) < want {
+		panic(fmt.Sprintf("CausalAttention: %d cached keys but queries reach position %d",
+			len(k), want-1))
+	}
 
-	for tq := 0; tq < T; tq++ {
-		// Causal mask: position tq may only attend to 0..tq, never to the future.
-		// Rather than building a full T x T matrix of scores and masking the
-		// upper triangle with -inf, we just never compute those.
-		scores := make([]float32, tq+1)
+	out = make([][]float32, Tq)
+	weights = make([][]float32, Tq)
+
+	for tq := 0; tq < Tq; tq++ {
+		pos := offset + tq // this query's absolute position
+
+		// Causal mask: position pos may only attend to 0..pos, never to the
+		// future. Rather than building a full T x T matrix of scores and masking
+		// the upper triangle with -inf, we just never compute those.
+		scores := make([]float32, pos+1)
 		maxScore := float32(math.Inf(-1))
-		for tk := 0; tk <= tq; tk++ {
+		for tk := 0; tk <= pos; tk++ {
 			var dot float32
 			for i := 0; i < headDim; i++ {
 				dot += q[tq][i] * k[tk][i]
@@ -53,7 +68,7 @@ func CausalAttention(q, k, v [][]float32) (out [][]float32, weights [][]float32)
 
 		// Weighted sum of value vectors using the attention weights.
 		outVec := make([]float32, headDim)
-		for tk := 0; tk <= tq; tk++ {
+		for tk := 0; tk <= pos; tk++ {
 			w := scores[tk]
 			for i := 0; i < headDim; i++ {
 				outVec[i] += w * v[tk][i]
@@ -80,29 +95,31 @@ func softmax(scores []float32, maxScore float32) {
 
 // Forward runs all NHead query heads and concatenates + projects the result.
 //
-// x is (T, NEmbed) and expected to already be normed. cos / sin must be
-// (T, HeadDim/2) — one row of rotation angles per position.
-func (a *Attention) Forward(x [][]float32, cos, sin [][]float32, tr Trace) ([][]float32, [][][]float32) {
+// x is (T, NEmbed) and expected to already be normed. It covers absolute
+// positions p.offset..p.offset+T-1 — during generation that's a single row well
+// past the start of the sequence.
+func (a *Attention) Forward(x [][]float32, p *pass) ([][]float32, [][][]float32) {
 	T := len(x)
 
 	q := MatMul(x, a.Wq) // (T, NHead*HeadDim)
 	k := MatMul(x, a.Wk) // (T, NKVHead*HeadDim)
 	v := MatMul(x, a.Wv) // (T, NKVHead*HeadDim)
 
-	// Norm + rotate each kv head exactly once. Every query head in the group
-	// reuses these — recomputing per query head would repeat the work
-	// GroupSize times for no reason.
-	kHeads := make([][][]float32, a.NKVHead)
-	vHeads := make([][][]float32, a.NKVHead)
+	// Where this layer's k/v live. With a cache they persist across calls and
+	// already hold the history; without one they're built fresh and discarded.
+	store := p.layerKV(a.NKVHead, T)
+
+	// Norm + rotate each kv head's new positions exactly once. Every query head
+	// in the group reuses them — recomputing per query head would repeat the
+	// work GroupSize times for no reason.
 	for kv := 0; kv < a.NKVHead; kv++ {
 		lo := kv * a.HeadDim
-		kHeads[kv] = make([][]float32, T)
-		vHeads[kv] = make([][]float32, T)
 		for t := 0; t < T; t++ {
 			// Qwen3 order is norm THEN rotary. Swapping them is self-consistent
 			// with random weights but wrong against trained ones.
-			kHeads[kv][t] = ApplyRotary(a.KNorm.ForwardVec(k[t][lo:lo+a.HeadDim]), cos[t], sin[t])
-			vHeads[kv][t] = v[t][lo : lo+a.HeadDim] // v stays raw: no norm, no rotary
+			normed := a.KNorm.ForwardVec(k[t][lo : lo+a.HeadDim])
+			store.append(kv, ApplyRotary(normed, p.cos[p.offset+t], p.sin[p.offset+t]),
+				v[t][lo:lo+a.HeadDim]) // v stays raw: no norm, no rotary
 		}
 	}
 
@@ -119,16 +136,17 @@ func (a *Attention) Forward(x [][]float32, cos, sin [][]float32, tr Trace) ([][]
 
 		qh := make([][]float32, T)
 		for t := 0; t < T; t++ {
+			pos := p.offset + t
 			normed := a.QNorm.ForwardVec(q[t][lo : lo+a.HeadDim])
-			qh[t] = ApplyRotary(normed, cos[t], sin[t])
+			qh[t] = ApplyRotary(normed, p.cos[pos], p.sin[pos])
 			// Report the last position: it has rotated the furthest, so the
 			// change is most visible there.
 			if t == T-1 {
-				tr.Rotary(h, normed, qh[t])
+				p.tr.Rotary(h, normed, qh[t])
 			}
 		}
 
-		headOut, w := CausalAttention(qh, kHeads[kv], vHeads[kv])
+		headOut, w := CausalAttention(qh, store.K[kv], store.V[kv], p.offset)
 		allWeights[h] = w
 		for t := 0; t < T; t++ {
 			copy(out[t][lo:lo+a.HeadDim], headOut[t])

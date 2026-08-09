@@ -1,0 +1,12 @@
+# Model weights — downloaded via `hf download`, not versioned
+checkpoints/
+
+# Compiled binary (go build -o GoLlama)
+/GoLlama
+
+# Go build/test artifacts
+*.test
+*.out
+
+# Trace files produced by `go run . -trace ...`
+*.jsonl

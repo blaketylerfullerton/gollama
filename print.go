@@ -215,23 +215,48 @@ func (w *walkthrough) label(i int) string {
 	if i >= len(w.labels) {
 		return fmt.Sprintf("t%d", i)
 	}
-	s := w.labels[i]
-	s = strings.ReplaceAll(s, "\n", "\\n")
-	s = strings.ReplaceAll(s, "\t", "\\t")
-	s = strings.ReplaceAll(s, " ", "_")
-	r := []rune(s)
+	r := []rune(sanitize(w.labels[i]))
 	if len(r) > 8 {
 		return string(r[:8])
 	}
 	return string(r)
 }
 
+// sanitize makes whitespace visible. A token's leading space is significant and
+// otherwise impossible to see, which turns " the" and "the" — two different
+// tokens — into the same thing on screen.
+func sanitize(s string) string {
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	return strings.ReplaceAll(s, " ", "_")
+}
+
 // PrintSummary shows every stage's magnitude in order. Reading it top to
 // bottom is the clearest picture of what a transformer actually does to a
 // vector: branch off, normalize, add the result back, repeat.
 func (w *walkthrough) PrintSummary() {
+	// A 28-layer model produces ~87 stages. Showing the head and tail is enough
+	// to read the trend; the middle is more of the same.
+	const maxRows = 24
+	elideFrom, elideTo := -1, -1
+	if len(w.stages) > maxRows {
+		elideFrom, elideTo = maxRows/2, len(w.stages)-maxRows/2
+	}
+
 	var prev float64
-	for _, s := range w.stages {
+	for i, s := range w.stages {
+		if i == elideFrom {
+			fmt.Printf("      %s\n", fmt.Sprintf("… %d stages elided …", elideTo-elideFrom))
+		}
+		if elideFrom >= 0 && i >= elideFrom && i < elideTo {
+			// Keep following the residual chain through the gap so the first
+			// delta printed after it is still measured against its predecessor.
+			if isResidual(s.name) {
+				prev = s.norm
+			}
+			continue
+		}
+
 		label := s.name
 		if s.layer >= 0 {
 			label = fmt.Sprintf("layer %d: %s", s.layer, s.name)
