@@ -11,7 +11,16 @@ import (
 	"github.com/blaketylerfullerton/GoLlama/model"
 	"github.com/blaketylerfullerton/GoLlama/tokenizer"
 	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/tui"
 )
+
+// isTerminal reports whether f is attached to a terminal. Bubbletea needs one:
+// under `go run . | less` or in CI there is nothing to draw on, so the splash is
+// skipped rather than failing.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
 
 // checkpointDir is where a real Qwen3 checkpoint is expected:
 //
@@ -38,7 +47,23 @@ func main() {
 	verbose := flag.Bool("v", false, "print the full layer-by-layer walkthrough")
 	prompt := flag.String("prompt", "The capital of France is", "prompt to run through the model")
 	tracePath := flag.String("trace", "", "write a trace of the forward pass to this file")
+	noSplash := flag.Bool("no-splash", false, "skip the welcome screen and run straight away")
 	flag.Parse()
+
+	// The welcome screen goes first, before the checkpoint is touched: it says
+	// what hardware this is about to run on and whether the weights are even
+	// there, both of which are worth knowing before a multi-second load. It's
+	// skipped when stdout isn't a terminal so piping still works.
+	if !*noSplash && isTerminal(os.Stdout) {
+		choice, err := tui.ShowWelcome(checkpointDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+			os.Exit(1)
+		}
+		if choice != tui.Run {
+			return
+		}
+	}
 
 	s, err := setup(*prompt)
 	if err != nil {

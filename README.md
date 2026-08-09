@@ -13,13 +13,40 @@ This is purely to help me understand inference and transformers better.
 
 Not optimal at all, just for learning. Meant to be a hackable, super simple project for understanding how LLM inference works from first principles.
 
-Inference only — no training. **The engine has no dependencies**; only the inspector TUI pulls anything in (bubbletea and lipgloss, isolated under `cmd/inspect`).
+Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tui/` and `cmd/inspect`). Nothing in `model/` or `tokenizer/` imports either.
 
 ## Running it
 
 ```bash
 go run .
 ```
+
+You get a welcome screen first — the llama on the left, the machine you're about to run on down the right:
+
+```text
+                     ▄▄  ▄▄       ╭───────────────────────────────────────────────────────╮
+                     ██  ██       │  this machine                                         │
+                    ▀███████▄▄    │  host       Blake's MacBook Air                       │
+                    █ o  ████     │  chip       Apple M4                                  │
+                    ▀██▄▄▄███     │  cores      10 cores (4P + 6E)                        │
+                     █████▀       │  gpu        10-core GPU (unused)                      │
+                     █████        │  memory     16.0 GB                                   │
+                    █████         │  platform   darwin/arm64                              │
+          ▄▄▄▄▄▄▄▄▄█████          │  runtime    go1.25.0 · GOMAXPROCS 10                  │
+   ▄▄███████████████████          │                                                       │
+    ████████████████████          │  weights                                              │
+    ████████████████████          │  model      qwen3-0.6b                                │
+     ▀██▀▀██▀    ▀██▀▀██▀         │  on disk    1.4 GB                                    │
+      ██  ██      ██  ██          │  resident   2.8 GB  (bf16 → f32)                      │
+      ██  ██      ██  ██          │                                                       │
+      ▀▀  ▀▀      ▀▀  ▀▀          ╰───────────────────────────────────────────────────────╯
+
+ enter run the model · q quit
+```
+
+Those two numbers are the ones that decide how this feels. Every matmul in `model/` is scalar Go on the CPU, so the core count is the speed and the resident size is whether it fits at all — worth seeing before the first token rather than inferring it from a disappointing one. Hardware detection is in `sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else.
+
+Press enter and the run itself is unchanged:
 
 ```text
 checkpoints/qwen3-0.6b
