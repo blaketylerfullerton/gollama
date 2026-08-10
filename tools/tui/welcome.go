@@ -30,9 +30,27 @@ const (
 	// Quit means they backed out — ctrl+c, q, or esc. The caller should exit
 	// without loading anything.
 	Quit Choice = iota
-	// Run means they pressed enter.
+	// Run means they picked "select a model" — go to the picker.
 	Run
+	// ShowAbout means they picked "what is GoLlama" — go read the about page,
+	// then come back to this menu.
+	ShowAbout
 )
+
+// menuItem is one row of the start menu: what it's called, and the detail
+// panel shown while it's highlighted.
+type menuItem struct {
+	title string
+	// detail renders the content panel for this item. It's a func rather than
+	// a precomputed string because the machine specs need the terminal width
+	// to wrap the download command, and that isn't known until View runs.
+	detail func(w *Welcome) string
+}
+
+var menuItems = []menuItem{
+	{title: "select a model", detail: (*Welcome).specs},
+	{title: "what is GoLlama", detail: (*Welcome).aboutBlurb},
+}
 
 // Checkpoint is what we found on disk where the weights are meant to be. It's
 // scanned rather than loaded: a directory listing costs nothing, and knowing the
@@ -73,6 +91,7 @@ type Welcome struct {
 	sys    sysinfo.Info
 	ckpt   Checkpoint
 	choice Choice
+	cursor int // which menuItems row is highlighted
 	w, h   int
 	// tick counts animation frames rather than storing one, so the llama's two
 	// motions can be derived from it independently. See llamaFrameAt.
@@ -116,8 +135,16 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, llamaTick()
 	case tea.KeyMsg:
 		switch msg.String() {
+		case "up", "k":
+			w.cursor = max(w.cursor-1, 0)
+		case "down", "j":
+			w.cursor = min(w.cursor+1, len(menuItems)-1)
 		case "enter", " ":
-			w.choice = Run
+			if w.cursor == 0 {
+				w.choice = Run
+			} else {
+				w.choice = ShowAbout
+			}
 			return w, tea.Quit
 		case "q", "esc", "ctrl+c":
 			w.choice = Quit
@@ -162,7 +189,8 @@ func (w *Welcome) View() string {
 	return screen(w.w, w.h, w.column(inner, rows), bar)
 }
 
-// column is the title with the specs panel under it, filling rows.
+// column is the title with the menu and its detail panel under it, filling
+// rows.
 //
 // The title sits on top of the box rather than off in the corner of the screen.
 // It names what the panel beneath it is describing, and a heading with its body
@@ -170,12 +198,32 @@ func (w *Welcome) View() string {
 // reads as page furniture.
 func (w *Welcome) column(width, rows int) string {
 	head := hero("GoLlama", subtitle, width)
+	menu := w.menu()
 	return lipgloss.JoinVertical(lipgloss.Left,
 		head,
 		"",
-		// Minus the title and the blank line under it, so the box ends where
-		// the body does.
-		stretch(panelStyle.Width(width-2), rows-lipgloss.Height(head)-1, w.specs()))
+		menu,
+		"",
+		// Minus the title, the menu, and the blank lines around them, so the
+		// box ends where the body does.
+		stretch(panelStyle.Width(width-2),
+			rows-lipgloss.Height(head)-lipgloss.Height(menu)-2,
+			menuItems[w.cursor].detail(w)))
+}
+
+// menu is the two-row start menu: what you can do from here, with the
+// highlighted row pointing at the panel underneath it the same way the
+// picker's cursor points at the memory column.
+func (w *Welcome) menu() string {
+	rows := make([]string, len(menuItems))
+	for i, item := range menuItems {
+		if i == w.cursor {
+			rows[i] = selectedStyle.Render("▸ " + item.title)
+			continue
+		}
+		rows[i] = "  " + dimStyle.Render(item.title)
+	}
+	return strings.Join(rows, "\n")
 }
 
 // specs is the right-hand column: what this machine is, then what's on disk to
@@ -238,11 +286,27 @@ func (w *Welcome) checkpointRows() []string {
 	}
 }
 
-// bar is the toolbar along the bottom: the two keys this screen answers to on
-// the left, and the other way into the program on the right.
+// aboutBlurb is the detail panel for the menu's second row: enough to say what
+// pressing enter leads to, not the whole page — that's what the about page
+// itself is for.
+func (w *Welcome) aboutBlurb() string {
+	rows := []string{
+		heading("What is GoLlama"),
+		"",
+		dimStyle.Render(aboutNotes[0]),
+		"",
+		valueStyle.Render("enter") + dimStyle.Render(" to read the rest — architecture, how the"),
+		dimStyle.Render("inspector works, and what's slow on purpose and why."),
+	}
+	return strings.Join(rows, "\n")
+}
+
+// bar is the toolbar along the bottom: the keys this screen answers to on the
+// left, and the other way into the program on the right.
 func (w *Welcome) bar() string {
 	keys := []string{
-		keyStyle.Render("enter") + dimStyle.Render(" choose a model"),
+		keyStyle.Render("↑↓") + dimStyle.Render(" choose"),
+		keyStyle.Render("enter") + dimStyle.Render(" select"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}
 	return toolbar(w.w, strings.Join(keys, dimStyle.Render(" · ")),

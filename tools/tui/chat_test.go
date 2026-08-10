@@ -13,7 +13,8 @@ import (
 func newTestChat(prompt string) (*Chat, chan tea.Msg, chan string) {
 	events := make(chan tea.Msg, 8)
 	reqs := make(chan string, 1)
-	c := NewChat("Qwen3-0.6B", events, reqs, prompt)
+	arch := known[0].Arch // Qwen3-0.6B's real shape, so the stats bar has real numbers to render
+	c := NewChat("Qwen3-0.6B", arch, events, reqs, prompt)
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
 	return c, events, reqs
 }
@@ -139,6 +140,60 @@ func TestChatFitsTheTerminal(t *testing.T) {
 			if got := lipgloss.Width(line); got > size.Width {
 				t.Errorf("at %dx%d: a %d-cell line: %q", size.Width, size.Height, got, line)
 			}
+		}
+	}
+}
+
+// tab has to actually switch what the viewport is showing, and a ChatStep has
+// to survive the round trip onto that screen — otherwise the inspect tab is
+// just an empty box with a label on it.
+func TestChatTabShowsSteps(t *testing.T) {
+	c, _, _ := newTestChat("hello")
+	c.Update(ChatStatus(""))
+	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	c.Update(ChatStep{
+		Token:      "Paris",
+		Attention:  []ChatCandidate{{Text: "capital", Prob: 0.6}},
+		Candidates: []ChatCandidate{{Text: ".", Prob: 0.4}},
+	})
+
+	if strings.Contains(c.View(), "Paris") {
+		t.Error("inspect content leaked into the chat tab's view")
+	}
+
+	c.Update(tea.KeyMsg{Type: tea.KeyTab})
+	if c.tab != tabInspect {
+		t.Fatalf("tab = %v after pressing tab, want inspect", c.tab)
+	}
+	view := c.View()
+	for _, want := range []string{"Paris", "capital", "60%", "."} {
+		if !strings.Contains(view, want) {
+			t.Errorf("inspect view is missing %q", want)
+		}
+	}
+}
+
+// The input is the chat tab's whole reason for existing; on the inspect tab
+// there's nothing to type into, so a stray keystroke there must not silently
+// land in a text box the reader can no longer see.
+func TestChatInputIsInertOnInspectTab(t *testing.T) {
+	c, _, _ := newTestChat("")
+	c.Update(ChatStatus(""))
+	c.Update(tea.KeyMsg{Type: tea.KeyTab})
+	c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
+	if c.input.Value() != "" {
+		t.Errorf("input.Value() = %q, want empty — keys on the inspect tab must not reach it", c.input.Value())
+	}
+}
+
+// The stats line has real numbers in it whatever the terminal width, and it
+// must never be the widest thing on screen — see the width guard in stats().
+func TestChatStatsFitsNarrowTerminal(t *testing.T) {
+	c, _, _ := newTestChat("hello")
+	c.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
+	for _, line := range strings.Split(c.View(), "\n") {
+		if got := lipgloss.Width(line); got > 50 {
+			t.Errorf("a %d-cell line at width 50: %q", got, line)
 		}
 	}
 }

@@ -1,12 +1,16 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
 )
 
 // The third screen: talk to the model you just picked.
@@ -16,12 +20,34 @@ import (
 // is a label for the header and two channels: one it reads streamed text and
 // status off of, one it writes what you typed onto. Whoever calls NewChat owns
 // the engine and decides what "generate" means; this file only owns the frame
-// around it.
+// around it — including a second tab, since "what did the model attend to"
+// is a question about that same stream of tokens, not a different program.
 
 // ChatToken is a slice of generated text as it comes off the model — usually
 // one token, decoded. It's a string rather than an id: this package doesn't
 // have a tokenizer to turn one back into the other.
 type ChatToken string
+
+// ChatCandidate is one entry in a ranked list — a token and a weight, meaning
+// either "probability of being next" or "share of attention", depending on
+// which list it's in. The screen doesn't care which; it draws both the same
+// way, because a bar that's a quarter as long already says "a quarter as
+// likely" without a column telling you what kind of likely.
+type ChatCandidate struct {
+	Text string
+	Prob float64
+}
+
+// ChatStep describes one generated token for the inspect tab: what the model
+// attended to while producing it, and what it would have said next at that
+// point. It rides alongside the ChatToken for the same token rather than
+// replacing it — the chat tab and the inspect tab are two views of one stream,
+// not two separate ones.
+type ChatStep struct {
+	Token      string
+	Attention  []ChatCandidate // which earlier tokens this one leaned on
+	Candidates []ChatCandidate // what the model ranked highest to come next
+}
 
 // ChatDone says the current turn finished — end of sequence, or the token
 // budget ran out. The screen goes back to accepting input.
@@ -45,6 +71,22 @@ const (
 	chatGenerating                  // a turn is in flight; input is read-only
 )
 
+// chatTab is which half of the screen is showing: the conversation, or what
+// the last few tokens actually did inside the model.
+type chatTab int
+
+const (
+	tabConversation chatTab = iota
+	tabInspect
+)
+
+func (t chatTab) String() string {
+	if t == tabInspect {
+		return "inspect"
+	}
+	return "chat"
+}
+
 // chatTurn is one exchange: what you typed, and however much of the model's
 // reply has arrived so far. model grows in place while a turn is in flight,
 // which is what makes the screen a stream rather than a spinner.
@@ -53,9 +95,15 @@ type chatTurn struct {
 	model string
 }
 
+// maxSteps bounds how many tokens' worth of inspect detail are kept. Every
+// entry holds a handful of ranked lists, and a long conversation shouldn't
+// mean an ever-growing one — only the tail of it is ever on screen anyway.
+const maxSteps = 64
+
 // Chat is the bubbletea model for the conversation screen.
 type Chat struct {
 	label string // what's loaded, for the header — a model name, or "loading…"
+	arch  Arch   // its shape, for the memory estimate in the stats bar
 
 	events <-chan tea.Msg
 	reqs   chan<- string
@@ -63,8 +111,17 @@ type Chat struct {
 	phase  chatPhase
 	status string
 	err    error
+	tab    chatTab
 
 	turns []chatTurn
+	steps []ChatStep
+
+	turnStarted  time.Time
+	turnTokens   int
+	lastTurnRate string // "12 tok in 4.1s (2.9 tok/s)", frozen once a turn ends
+
+	sys sysinfo.Info
+
 	input textinput.Model
 	vp    viewport.Model
 
@@ -73,10 +130,23 @@ type Chat struct {
 
 var _ tea.Model = (*Chat)(nil)
 
+// chatSysTickMsg drives the stats bar's memory reading. sysinfo.Detect shells
+// out to sysctl and vm_stat, cheap enough for once every couple of seconds but
+// not for every render — a render happens on every keystroke and every token.
+type chatSysTickMsg struct{}
+
+const chatSysInterval = 2 * time.Second
+
+func chatSysTick() tea.Cmd {
+	return tea.Tick(chatSysInterval, func(time.Time) tea.Msg { return chatSysTickMsg{} })
+}
+
 // NewChat builds the screen. events is read for as long as the program runs;
 // reqs is written to once per submitted prompt, so it should be buffered by at
-// least one or Update blocks the render loop on a slow engine.
-func NewChat(label string, events <-chan tea.Msg, reqs chan<- string, prompt string) *Chat {
+// least one or Update blocks the render loop on a slow engine. arch describes
+// what's loaded, purely for the memory estimate — the same numbers the picker
+// showed before this screen, so the two stay honest with each other.
+func NewChat(label string, arch Arch, events <-chan tea.Msg, reqs chan<- string, prompt string) *Chat {
 	in := textinput.New()
 	in.Placeholder = "type anything and press enter"
 	in.SetValue(prompt)
@@ -86,16 +156,18 @@ func NewChat(label string, events <-chan tea.Msg, reqs chan<- string, prompt str
 
 	return &Chat{
 		label:  label,
+		arch:   arch,
 		events: events,
 		reqs:   reqs,
 		phase:  chatLoading,
 		status: "loading…",
+		sys:    sysinfo.Detect(),
 		input:  in,
 		vp:     viewport.New(0, 0),
 	}
 }
 
-func (c *Chat) Init() tea.Cmd { return waitForChat(c.events) }
+func (c *Chat) Init() tea.Cmd { return tea.Batch(waitForChat(c.events), chatSysTick()) }
 
 // waitForChat turns the next message off ch into a bubbletea command, the same
 // shape every other live screen in this codebase uses to drain a channel: it
@@ -127,6 +199,10 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.layout()
 		return c, nil
 
+	case chatSysTickMsg:
+		c.sys = sysinfo.Detect()
+		return c, chatSysTick()
+
 	case ChatStatus:
 		c.status, c.err = string(msg), nil
 		if c.phase == chatLoading {
@@ -138,11 +214,21 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(c.turns) > 0 {
 			c.turns[len(c.turns)-1].model += string(msg)
 		}
+		c.turnTokens++
+		c.refresh()
+		return c, waitForChat(c.events)
+
+	case ChatStep:
+		c.steps = append(c.steps, msg)
+		if over := len(c.steps) - maxSteps; over > 0 {
+			c.steps = c.steps[over:]
+		}
 		c.refresh()
 		return c, waitForChat(c.events)
 
 	case ChatDone:
 		c.phase, c.status = chatIdle, ""
+		c.lastTurnRate = c.turnRate()
 		c.input.Focus()
 		return c, waitForChat(c.events)
 
@@ -156,10 +242,26 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return c, nil
 }
 
+// turnRate formats how the turn that just finished went, for the stats bar. It
+// only runs once, on ChatDone, rather than every token — the number is more
+// readable settled than jittering with every render.
+func (c *Chat) turnRate() string {
+	if c.turnTokens == 0 {
+		return ""
+	}
+	elapsed := time.Since(c.turnStarted)
+	rate := float64(c.turnTokens) / elapsed.Seconds()
+	return fmt.Sprintf("%d tok in %s (%.1f tok/s)", c.turnTokens, elapsed.Round(100*time.Millisecond), rate)
+}
+
 func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		return c, tea.Quit
+	case "tab":
+		c.tab = (c.tab + 1) % 2
+		c.refresh()
+		return c, nil
 	case "enter":
 		return c, c.submit()
 	case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
@@ -167,10 +269,11 @@ func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		c.vp, cmd = c.vp.Update(msg)
 		return c, cmd
 	}
-	if c.phase == chatGenerating {
-		// The prompt that started this turn is already on screen and the
-		// engine is mid-pass; there is nothing a keystroke could do but corrupt
-		// the next submission.
+	if c.phase == chatGenerating || c.tab == tabInspect {
+		// Mid-turn, the prompt that started it is already on screen and there's
+		// nothing a keystroke could do but corrupt the next submission. On the
+		// inspect tab there is no box to type into at all — every other key
+		// there is a scroll key, handled above.
 		return c, nil
 	}
 	var cmd tea.Cmd
@@ -189,16 +292,22 @@ func (c *Chat) submit() tea.Cmd {
 	c.turns = append(c.turns, chatTurn{you: text})
 	c.input.Reset()
 	c.phase, c.status, c.err = chatGenerating, "thinking…", nil
+	c.turnStarted, c.turnTokens = time.Now(), 0
 	c.refresh()
 
 	reqs := c.reqs
 	return func() tea.Msg { reqs <- text; return nil }
 }
 
-// refresh re-renders the transcript into the viewport and follows the bottom,
-// so a token landing mid-scroll doesn't leave the reader stranded above it.
+// refresh re-renders whichever tab is showing into the viewport and follows
+// the bottom, so a token landing mid-scroll doesn't leave the reader stranded
+// above it.
 func (c *Chat) refresh() {
-	c.vp.SetContent(c.transcript())
+	if c.tab == tabInspect {
+		c.vp.SetContent(c.inspect())
+	} else {
+		c.vp.SetContent(c.transcript())
+	}
 	c.vp.GotoBottom()
 }
 
@@ -219,6 +328,38 @@ func (c *Chat) transcript() string {
 	return strings.Join(blocks, "\n\n")
 }
 
+// inspect is the second tab: one block per recent token, each with the two
+// rankings that explain it — what it leaned on, and what it thought came next.
+// It's the same idea as cmd/inspect's logit lens and attention views, sized
+// down to fit beside a conversation instead of a whole screen.
+func (c *Chat) inspect() string {
+	if len(c.steps) == 0 {
+		return dimStyle.Render("Nothing generated yet — send something on the chat tab, then come back " +
+			"here to see what each token attended to and what it ranked as likely to follow.")
+	}
+	blocks := make([]string, len(c.steps))
+	for i, s := range c.steps {
+		blocks[i] = keyStyle.Render(fmt.Sprintf("%q", s.Token)) + "\n" +
+			"  " + dimStyle.Render("attended to  ") + candidateList(s.Attention) + "\n" +
+			"  " + dimStyle.Render("ranked next  ") + candidateList(s.Candidates)
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+// candidateList renders a ranked list as "text 42% · text 18% · …", the same
+// compact form the picker uses for its own verdicts — a row you can scan
+// without the columns of a table.
+func candidateList(cs []ChatCandidate) string {
+	if len(cs) == 0 {
+		return dimStyle.Render("—")
+	}
+	parts := make([]string, len(cs))
+	for i, c := range cs {
+		parts[i] = valueStyle.Render(fmt.Sprintf("%q", c.Text)) + dimStyle.Render(fmt.Sprintf(" %.0f%%", 100*c.Prob))
+	}
+	return strings.Join(parts, dimStyle.Render("  ·  "))
+}
+
 // layout sizes the input and the transcript viewport to the current terminal.
 // It's called on every resize rather than computed once, for the same reason
 // the picker recomputes its row count on resize: the frame this screen sits in
@@ -227,10 +368,16 @@ func (c *Chat) transcript() string {
 func (c *Chat) layout() {
 	bar := c.bar()
 	inner := max(c.w-2*screenMargin, minSpecsWidth)
-	rows := bodyRows(c.h, bar) - 2 // less the title and the blank line under it
+	// Title, blank line, tab strip, blank line, and the stats line above the
+	// toolbar all come out of the body before the panel gets what's left.
+	rows := bodyRows(c.h, bar) - 4
 
 	c.input.Width = max(inner-4-lipgloss.Width(c.input.Prompt), 8)
-	c.vp.Width = inner - 4 // panel padding, no border cost here — see View
+	// The panel renders at panelStyle.Width(inner-2), and that call's own
+	// padding (4) sits on top of the width it's given rather than inside it —
+	// so the text column inside the border and padding is inner-2-4. See
+	// picker.go's list/mem panels for the same arithmetic.
+	c.vp.Width = inner - 6
 	c.vp.Height = max(rows-4, 3)
 	c.refresh()
 }
@@ -239,13 +386,32 @@ func (c *Chat) View() string {
 	bar := c.bar()
 	inner := max(c.w-2*screenMargin, minSpecsWidth)
 
-	transcript := panelStyle.Width(inner - 2).Height(c.vp.Height).Render(c.vp.View())
+	panel := panelStyle.Width(inner - 2).Height(c.vp.Height).Render(c.vp.View())
 
-	body := lipgloss.JoinVertical(lipgloss.Left,
-		header("GoLlama", c.headerSubtitle(), inner), "",
-		transcript, "", c.input.View())
+	rows := []string{header("GoLlama", c.headerSubtitle(), inner), "", c.tabs(inner), "", panel}
+	if c.tab == tabConversation {
+		rows = append(rows, "", c.input.View())
+	}
+	rows = append(rows, "", c.stats(inner))
 
-	return screen(c.w, c.h, body, bar)
+	return screen(c.w, c.h, lipgloss.JoinVertical(lipgloss.Left, rows...), bar)
+}
+
+// tabs is the nav strip: which of the two views is showing, and the key that
+// switches. It sits under the title rather than in the toolbar because it's a
+// choice about the panel below it, not a global command like quitting.
+func (c *Chat) tabs(width int) string {
+	var cells []string
+	for _, t := range []chatTab{tabConversation, tabInspect} {
+		label := " " + t.String() + " "
+		if t == c.tab {
+			cells = append(cells, selectedStyle.Render(label))
+		} else {
+			cells = append(cells, dimStyle.Render(label))
+		}
+	}
+	strip := strings.Join(cells, dimStyle.Render("│"))
+	return strip + dimStyle.Render("   tab to switch")
 }
 
 func (c *Chat) headerSubtitle() string {
@@ -255,9 +421,66 @@ func (c *Chat) headerSubtitle() string {
 	return "chatting with " + c.label
 }
 
+// stats is the line above the toolbar: what this conversation is costing, in
+// the same units the picker used to decide whether to load the model at all.
+// It's memory rather than the toolbar's keys because it isn't a command — it's
+// the answer to "is this still fine", which is worth being able to glance at
+// without pressing anything.
+//
+// Parts drop from the end, least essential first, until what's left fits
+// width — the same accommodation the toolbar makes for its own right half. A
+// line that wrapped would drag every shorter line above it out to match, since
+// lipgloss.JoinVertical pads a block to its widest member.
+func (c *Chat) stats(width int) string {
+	parts := []string{
+		"ram " + memPhrase(c.sys),
+		"resident ~" + sysinfo.Bytes(c.arch.ResidentBytes()),
+	}
+	if c.lastTurnRate != "" {
+		parts = append(parts, c.lastTurnRate)
+	} else if c.phase == chatGenerating && c.turnTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%d tok so far", c.turnTokens))
+	}
+	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, "   ·   ")) > width {
+		parts = parts[:len(parts)-1]
+	}
+	line := strings.Join(parts, "   ·   ")
+	if lipgloss.Width(line) > width {
+		line = truncateCells(line, width)
+	}
+	return dimStyle.Render(line)
+}
+
+// truncateCells clips s to n terminal cells, measuring in display width rather
+// than bytes — a byte-index slice cuts multi-byte runes like "…" or an em dash
+// in half, which renders as a replacement glyph rather than a clean edge.
+func truncateCells(s string, n int) string {
+	var width int
+	for i, r := range s {
+		w := lipgloss.Width(string(r))
+		if width+w > n {
+			return s[:i]
+		}
+		width += w
+	}
+	return s
+}
+
+// memPhrase is "6.4GB free of 16.0GB", or "unknown" on a platform sysinfo
+// couldn't read — the same fallback the welcome screen uses for the same
+// reason: a blank field reads as a bug, and a platform that doesn't report
+// memory isn't one.
+func memPhrase(s sysinfo.Info) string {
+	if s.AvailableBytes == 0 || s.MemoryBytes == 0 {
+		return "unknown"
+	}
+	return sysinfo.Bytes(int64(s.AvailableBytes)) + " free of " + sysinfo.Bytes(int64(s.MemoryBytes))
+}
+
 func (c *Chat) bar() string {
 	keys := []string{
 		keyStyle.Render("enter") + dimStyle.Render(" send"),
+		keyStyle.Render("tab") + dimStyle.Render(" inspect"),
 		keyStyle.Render("↑↓") + dimStyle.Render(" scroll"),
 		keyStyle.Render("esc") + dimStyle.Render(" quit"),
 	}

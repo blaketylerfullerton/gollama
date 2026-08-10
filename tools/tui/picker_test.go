@@ -365,8 +365,8 @@ func TestGaugeWithoutMemoryInfo(t *testing.T) {
 	if strings.Contains(got, "█") || strings.Contains(got, "won't fit") {
 		t.Errorf("gauge rendered a verdict with no memory to compare against: %q", got)
 	}
-	if !strings.Contains(p.memory(), "unknown") {
-		t.Error("the memory panel does not say the numbers are unavailable")
+	if !strings.Contains(p.headerRow(100), "unknown") {
+		t.Error("the header does not say the machine's numbers are unavailable")
 	}
 }
 
@@ -379,8 +379,8 @@ func TestPickerViewShowsTheEssentials(t *testing.T) {
 	view := NewPicker(root, testSys()).View()
 	for _, want := range []string{
 		"choose a model to start with",
-		"models", "memory after load",
-		"weights", "kv / token", "resident", "free after",
+		"models", "MEMORY AFTER LOAD",
+		"test", "resident", "free after", "keep",
 		"Qwen3-0.6B",
 	} {
 		if !strings.Contains(view, want) {

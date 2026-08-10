@@ -58,7 +58,6 @@ func main() {
 	// multi-second load. It's skipped when stdout isn't a terminal so piping
 	// still works, and skipped with -no-splash, in which case the default
 	// checkpoint is used if it's there.
-	dir := checkpointDir
 	interactive := !*noSplash && isTerminal(os.Stdout)
 	if interactive {
 		chosen, ok, err := tui.Start(checkpointDir)
@@ -69,25 +68,30 @@ func main() {
 		if !ok {
 			return
 		}
-		dir = chosen.Dir // empty when they picked the built-in random model
-	}
 
-	s, err := setup(dir, *prompt)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Coming through the splash lands on the chat screen — the picker just
-	// answered "what to run", and talking to it is the point. -no-splash and
-	// piped output keep the printed walkthrough, since there's no screen to
-	// chat on and a script reading stdout wants the old fixed output anyway.
-	if interactive {
-		if err := runChatUI(s); err != nil {
+		// Coming through the splash lands on the chat screen — the picker just
+		// answered "what to run", and talking to it is the point. The
+		// checkpoint itself isn't loaded here: chosen.Name and chosen.Arch are
+		// already known from the catalog, so the chat screen's alt screen can
+		// open immediately and load in the background, rather than this
+		// blocking in plain terminal between the picker closing and the chat
+		// screen opening — which is what used to make picking a model look
+		// like the program had quit and started over.
+		label := chosen.Name
+		if err := runChatUI(chosen.Dir, label, *prompt, chosen.Arch); err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}
 		return
+	}
+
+	// -no-splash and piped output keep the printed walkthrough, since there's
+	// no screen to chat on and a script reading stdout wants the old fixed
+	// output anyway.
+	s, err := setup(checkpointDir, *prompt)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+		os.Exit(1)
 	}
 	if err := run(s, *verbose, *tracePath); err != nil {
 		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)

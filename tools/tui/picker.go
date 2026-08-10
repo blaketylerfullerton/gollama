@@ -44,10 +44,13 @@ const contextEstimate = 4096
 // windowed down past this the list is more scrolling than list.
 const minVisibleRows = 8
 
-// listChrome is every row the screen spends on something other than a model:
-// the title block, the list panel's border and heading, the description panel
-// under it, and the footer. What's left at the current height is the list.
-const listChrome = 22
+// listFrame is every row around the list that isn't the description/memory
+// panel underneath it: the title line and its blank line, the list panel's own
+// heading and border, and the gap before the panel below. The description and
+// memory panel's own height is measured rather than guessed at, so a wider
+// terminal that wraps their prose onto fewer lines gives the freed rows to the
+// list instead of leaving them as padding inside a panel that didn't need them.
+const listFrame = 8
 
 // Picker is the bubbletea model for the model-selection screen.
 type Picker struct {
@@ -135,8 +138,17 @@ func (p *Picker) move(d int) {
 // visibleRows is how many models the list shows at the current height. A tall
 // terminal gets the whole catalog without scrolling, which is the point of
 // filling the screen rather than drawing a fixed-size card in the corner of it.
+//
+// The description/memory panel is rendered here at its natural height — not
+// stretched to fill leftover space the way it used to be — so whatever room
+// that panel doesn't need goes to the list instead of sitting as blank padding
+// inside a box that already said everything it had to say.
 func (p *Picker) visibleRows() int {
-	return min(max(p.h-listChrome, minVisibleRows), max(len(p.models), 1))
+	inner := max(p.w-2*screenMargin, 24)
+	mem := memPanelStyle.Render(p.memory())
+	bottom := p.bottom(inner, 0, mem)
+	chrome := listFrame + lipgloss.Height(bottom) + lipgloss.Height(p.bar())
+	return min(max(p.h-chrome, minVisibleRows), max(len(p.models), 1))
 }
 
 // scroll keeps the cursor inside the visible window.
@@ -172,28 +184,57 @@ func (p *Picker) View() string {
 	// off the top for the title and the blank line under it.
 	bar := p.bar()
 	inner := max(p.w-2*screenMargin, 24)
-	rows := bodyRows(p.h, bar) - 2
 
 	// The list is the one panel that's every model at once rather than a
 	// reading about the one under the cursor, so it's the one that gets the
 	// full width — a table of numbers is exactly as wide as its widest row
 	// wherever that lands, and stopping short of the terminal edge for no
-	// reason reads as an accident.
+	// reason reads as an accident. visibleRows already gave it whatever room
+	// the description/memory panel below didn't need, so it's sized here at
+	// its natural height rather than stretched further.
 	list := panelStyle.Width(inner - 2).Render(p.list(inner - 6)) // less border + padding
 
 	// Below it, the model's own summary beside what running it costs on this
 	// machine — the memory column is a fixed width of number columns, so the
 	// description takes whatever's left rather than the two splitting the row
-	// down the middle.
+	// down the middle. Rendered at its natural height: any leftover space in a
+	// tall terminal went to the list above, not into padding here.
 	mem := memPanelStyle.Render(p.memory())
-	room := rows - lipgloss.Height(list)
-	bottom := p.bottom(inner, room, mem)
+	bottom := p.bottom(inner, 0, mem)
 
 	// Same shape as the welcome screen: the title sits directly on top of the
 	// block it names rather than off in the corner of the terminal.
 	body := lipgloss.JoinVertical(lipgloss.Left,
-		header("GoLlama", "choose a model to start with", lipgloss.Width(list)), "", list, bottom)
+		p.headerRow(lipgloss.Width(list)), "", list, bottom)
 	return screen(p.w, p.h, body, bar)
+}
+
+// headerRow is the title with this machine's vitals pushed to the far end of
+// the same line — the numbers that decide what fits are worth seeing before
+// scanning a single row of the list, and a line that already exists is a
+// cheaper place for them than a panel of their own.
+func (p *Picker) headerRow(width int) string {
+	title := header("GoLlama", "choose a model to start with", width)
+	specs := dimStyle.Render(fmt.Sprintf("%s · %s ram · %s free",
+		nameOr(p.sys.Host, "unknown"), sizeOr(p.sys.MemoryBytes), sizeOr(p.sys.AvailableBytes)))
+	if gap := width - lipgloss.Width(title) - lipgloss.Width(specs); gap >= 2 {
+		return title + strings.Repeat(" ", gap) + specs
+	}
+	return title
+}
+
+func nameOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
+}
+
+func sizeOr(n uint64) string {
+	if n == 0 {
+		return "unknown"
+	}
+	return sysinfo.Bytes(int64(n))
 }
 
 // bottom lays the description beside the memory column, each stretched to the
@@ -375,12 +416,14 @@ func (p *Picker) memory() string {
 	resident := weights + kv
 
 	rows := []string{
-		heading("memory after load"),
+		heading("MEMORY AFTER LOAD"),
 		"",
-		memRow("total ram", memValue(int64(p.sys.MemoryBytes))),
-		memRow("available", memValue(int64(p.sys.AvailableBytes))),
-		dimStyle.Render("  an estimate, not a promise"),
-		"",
+	}
+
+	if margin := p.sys.Headroom() / 2; margin > 0 {
+		rows = append(rows,
+			dimStyle.Render(fmt.Sprintf("recommendations assume you keep %s free", sysinfo.Bytes(int64(margin)))),
+			"")
 	}
 
 	if !m.Installed && !m.Demo {
@@ -391,11 +434,6 @@ func (p *Picker) memory() string {
 	}
 
 	rows = append(rows,
-		memRow("weights", memValue(weights)),
-		dimStyle.Render("  bf16 on disk → f32 in ram"),
-		memRow("kv / token", memValue(a.KVBytesPerToken())),
-		memRow(fmt.Sprintf("kv @ %d", ctx), memValue(kv)),
-		dimStyle.Render(strings.Repeat("─", memInnerWidth)),
 		memRow("resident", valueStyle.Render(padLeft(sysinfo.Bytes(resident), 10))),
 	)
 

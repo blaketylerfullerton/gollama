@@ -118,6 +118,74 @@ func TestWelcomeKeys(t *testing.T) {
 	}
 }
 
+// The menu opens on "select a model" — that's the common case, and pressing
+// enter without touching an arrow key should do the thing most people came
+// here for, not the about page.
+func TestWelcomeOpensOnSelectAModel(t *testing.T) {
+	w := NewWelcome(t.TempDir())
+	if w.cursor != 0 {
+		t.Errorf("cursor = %d, want 0 (select a model)", w.cursor)
+	}
+	_, cmd := w.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter did not end the screen")
+	}
+	if w.Choice() != Run {
+		t.Errorf("Choice() = %v, want Run", w.Choice())
+	}
+}
+
+// Moving down to the second row and pressing enter has to lead to the about
+// page, not fall through to Run — the whole point of the row.
+func TestWelcomeSelectsAbout(t *testing.T) {
+	w := NewWelcome(t.TempDir())
+	w.Update(key("down"))
+	if w.cursor != 1 {
+		t.Fatalf("cursor = %d after down, want 1", w.cursor)
+	}
+	_, cmd := w.Update(key("enter"))
+	if cmd == nil {
+		t.Fatal("enter did not end the screen")
+	}
+	if w.Choice() != ShowAbout {
+		t.Errorf("Choice() = %v, want ShowAbout", w.Choice())
+	}
+}
+
+// Two rows, no wrapping — same reasoning as the picker's list: one press too
+// many past either end should not silently jump to the other end.
+func TestWelcomeCursorDoesNotWrap(t *testing.T) {
+	w := NewWelcome(t.TempDir())
+	w.Update(key("k")) // already at the top
+	if w.cursor != 0 {
+		t.Errorf("cursor = %d after up from the top, want 0", w.cursor)
+	}
+	for range len(menuItems) + 3 {
+		w.Update(key("j"))
+	}
+	if want := len(menuItems) - 1; w.cursor != want {
+		t.Errorf("cursor = %d after running off the bottom, want %d", w.cursor, want)
+	}
+}
+
+// The whole point of the menu is that each row explains what pressing enter
+// on it leads to — the machine specs for the first, a teaser for the second.
+func TestWelcomeShowsBothMenuRows(t *testing.T) {
+	w := NewWelcome(t.TempDir())
+	view := w.View()
+	for _, want := range []string{"select a model", "what is GoLlama", "This machine"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("view is missing %q", want)
+		}
+	}
+
+	w.Update(key("down"))
+	view = w.View()
+	if !strings.Contains(view, "enter") || !strings.Contains(view, "read the rest") {
+		t.Error("highlighting \"what is GoLlama\" did not show its teaser")
+	}
+}
+
 // An unrelated key must not fall through to a choice — the screen should just
 // sit there.
 func TestWelcomeIgnoresOtherKeys(t *testing.T) {
