@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
 // feed drives the app through a sequence of messages the way bubbletea would,

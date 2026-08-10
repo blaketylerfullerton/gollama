@@ -8,10 +8,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/blaketylerfullerton/GoLlama/model"
-	"github.com/blaketylerfullerton/GoLlama/tokenizer"
-	"github.com/blaketylerfullerton/GoLlama/trace"
-	"github.com/blaketylerfullerton/GoLlama/tui"
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
+	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
+	"github.com/blaketylerfullerton/GoLlama/tools/tui"
+	"github.com/blaketylerfullerton/GoLlama/tools/walkthrough"
 )
 
 // isTerminal reports whether f is attached to a terminal. Bubbletea needs one:
@@ -37,6 +38,7 @@ type session struct {
 	tok    *tokenizer.Tokenizer
 	ids    []int
 	prompt string
+	dir    string // where the weights came from; empty for the random model
 	real   bool
 	// maxNewTokens stays small for the real model: at 0.6B with a naive matmul
 	// each token is most of a second.
@@ -50,22 +52,26 @@ func main() {
 	noSplash := flag.Bool("no-splash", false, "skip the welcome screen and run straight away")
 	flag.Parse()
 
-	// The welcome screen goes first, before the checkpoint is touched: it says
-	// what hardware this is about to run on and whether the weights are even
-	// there, both of which are worth knowing before a multi-second load. It's
-	// skipped when stdout isn't a terminal so piping still works.
+	// The splash goes first, before any checkpoint is touched: it says what
+	// hardware this is about to run on, then asks which model to put on it and
+	// shows what that costs in memory. Both are worth knowing before a
+	// multi-second load. It's skipped when stdout isn't a terminal so piping
+	// still works, and skipped with -no-splash, in which case the default
+	// checkpoint is used if it's there.
+	dir := checkpointDir
 	if !*noSplash && isTerminal(os.Stdout) {
-		choice, err := tui.ShowWelcome(checkpointDir)
+		chosen, ok, err := tui.Start(checkpointDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}
-		if choice != tui.Run {
+		if !ok {
 			return
 		}
+		dir = chosen.Dir // empty when they picked the built-in random model
 	}
 
-	s, err := setup(*prompt)
+	s, err := setup(dir, *prompt)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 		os.Exit(1)
@@ -85,7 +91,7 @@ func run(s *session, verbose bool, tracePath string) error {
 
 	// --- what we're running -------------------------------------------------
 	if s.real {
-		fmt.Printf("%s\n", checkpointDir)
+		fmt.Printf("%s\n", s.dir)
 	} else {
 		fmt.Printf("no checkpoint at %s — using a tiny random model, so the numbers are noise\n"+
 			"  huggingface-cli download Qwen/Qwen3-0.6B --local-dir %s\n", checkpointDir, checkpointDir)
@@ -103,10 +109,10 @@ func run(s *session, verbose bool, tracePath string) error {
 
 	// A tracer is only attached when someone is going to read the output. With
 	// none, every hook in the forward pass is a no-op behind one nil check.
-	var walk *walkthrough
+	var walk *walkthrough.Walkthrough
 	tracers := []model.Tracer{}
 	if verbose {
-		walk = &walkthrough{labels: labels, detailLayer: 0, detailHead: 0}
+		walk = walkthrough.New(labels)
 		tracers = append(tracers, walk)
 	}
 	traceWriter, closeTrace, err := openTrace(tracePath, s, labels)
@@ -117,7 +123,7 @@ func run(s *session, verbose bool, tracePath string) error {
 	if traceWriter != nil {
 		tracers = append(tracers, traceWriter)
 	}
-	s.gpt.Trace = tracerFor(tracers...)
+	s.gpt.Trace = trace.Tee(tracers...)
 
 	// --- the forward pass ---------------------------------------------------
 	if verbose {
@@ -136,7 +142,7 @@ func run(s *session, verbose bool, tracePath string) error {
 
 		fmt.Println(rule("rotary position tables"))
 		cos, sin := s.gpt.RotaryTables()
-		PrintRotaryTable(cos, sin, 2)
+		walkthrough.PrintRotaryTable(cos, sin, 2)
 
 		fmt.Println(rule("stage magnitudes (mean ‖x‖ over tokens)"))
 		walk.PrintSummary()
@@ -243,19 +249,26 @@ func openTrace(path string, s *session, labels []string) (*trace.Writer, func(),
 
 // --- setup ------------------------------------------------------------------
 
-func setup(prompt string) (*session, error) {
-	if _, err := os.Stat(filepath.Join(checkpointDir, "model.safetensors")); err == nil {
-		return setupReal(prompt)
+// setup loads the checkpoint in dir, or the tiny random model when dir is empty
+// or has no weights in it. An empty dir is a deliberate choice — the picker uses
+// it for the built-in model — while a dir with nothing in it is the fresh-clone
+// case, and both end up in the same place.
+func setup(dir, prompt string) (*session, error) {
+	if dir == "" {
+		return setupDemo(prompt)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "model.safetensors")); err == nil {
+		return setupReal(dir, prompt)
 	}
 	return setupDemo(prompt)
 }
 
-func setupReal(prompt string) (*session, error) {
-	tok, err := tokenizer.FromDirectory(checkpointDir)
+func setupReal(dir, prompt string) (*session, error) {
+	tok, err := tokenizer.FromDirectory(dir)
 	if err != nil {
 		return nil, fmt.Errorf("loading tokenizer: %w", err)
 	}
-	gpt, err := model.FromDirectory(checkpointDir)
+	gpt, err := model.FromDirectory(dir)
 	if err != nil {
 		return nil, fmt.Errorf("loading model: %w", err)
 	}
@@ -263,12 +276,12 @@ func setupReal(prompt string) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &session{gpt: gpt, tok: tok, ids: ids, prompt: prompt,
+	return &session{gpt: gpt, tok: tok, ids: ids, prompt: prompt, dir: dir,
 		real: true, maxNewTokens: 3}, nil
 }
 
 func setupDemo(prompt string) (*session, error) {
-	tok, err := tokenizer.FromDirectory("tokenizer/testdata")
+	tok, err := tokenizer.FromDirectory("engine/tokenizer/testdata")
 	if err != nil {
 		return nil, fmt.Errorf("loading tokenizer: %w", err)
 	}
@@ -323,7 +336,7 @@ func traceHeader(s *session, labels []string) trace.Header {
 	}
 	name := "random model (no checkpoint)"
 	if s.real {
-		name = checkpointDir
+		name = s.dir
 	}
 	return trace.Header{
 		Model:  name,
@@ -348,7 +361,7 @@ func rule(title string) string {
 func visible(labels []string) []string {
 	out := make([]string, len(labels))
 	for i, l := range labels {
-		out[i] = sanitize(l)
+		out[i] = walkthrough.Sanitize(l)
 	}
 	return out
 }

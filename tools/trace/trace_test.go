@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/blaketylerfullerton/GoLlama/model"
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
 )
 
 func testHeader() Header {

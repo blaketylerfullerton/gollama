@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/blaketylerfullerton/GoLlama/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
 )
 
 // liveApp wires up an app in live mode with a request channel we can inspect.

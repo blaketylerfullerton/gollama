@@ -56,6 +56,53 @@ func detect(in *Info) {
 		in.Host = name
 	}
 	in.GPU = gpu(ctx)
+	in.AvailableBytes = available(ctx)
+}
+
+var pageSize = regexp.MustCompile(`page size of (\d+) bytes`)
+
+// available approximates what macOS would hand out before it started
+// compressing or swapping.
+//
+// There is no single "available" counter on Darwin the way Linux publishes
+// MemAvailable, so this sums the page classes the kernel will reclaim without
+// paging anything out: free pages, the inactive list, speculative read-ahead,
+// and purgeable caches. Wired, active and already-compressed pages are excluded
+// — those are the ones a new 2GB allocation would actually have to fight for.
+// It's an estimate, and it's labelled as one on screen.
+func available(ctx context.Context) uint64 {
+	out, ok := run(ctx, "vm_stat")
+	if !ok {
+		return 0
+	}
+	m := pageSize.FindStringSubmatch(out)
+	if m == nil {
+		return 0
+	}
+	size, err := strconv.ParseUint(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+
+	var pages uint64
+	for _, line := range strings.Split(out, "\n") {
+		key, value, found := strings.Cut(line, ":")
+		if !found {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "Pages free", "Pages inactive", "Pages speculative", "Pages purgeable":
+		default:
+			continue
+		}
+		// vm_stat writes counts with a trailing period: "Pages free: 12345."
+		n, err := strconv.ParseUint(strings.Trim(strings.TrimSpace(value), "."), 10, 64)
+		if err != nil {
+			continue
+		}
+		pages += n
+	}
+	return pages * size
 }
 
 func sysctl(ctx context.Context, key string) (string, bool) {

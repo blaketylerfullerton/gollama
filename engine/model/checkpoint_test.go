@@ -6,14 +6,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/blaketylerfullerton/GoLlama/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
 )
 
 // checkpointDir is where the Qwen3-0.6B download lands. These are integration
 // tests: they skip when the checkpoint is absent so a fresh clone still passes,
 // and skip under -short because they read 1.5GB and take seconds, not
 // microseconds.
-const checkpointDir = "../checkpoints/qwen3-0.6b"
+const checkpointDir = "../../checkpoints/qwen3-0.6b"
 
 func realGPT(t *testing.T) *GPT {
 	t.Helper()

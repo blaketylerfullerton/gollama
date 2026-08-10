@@ -30,6 +30,12 @@ type Info struct {
 	GPU    string // e.g. "10-core GPU", empty when unknown
 
 	MemoryBytes uint64 // total physical RAM, 0 when unknown
+	// AvailableBytes is roughly what a new process could claim without pushing
+	// anything to swap. It's an estimate — every OS accounts for cache and
+	// compressed pages differently — but it's the number that decides whether
+	// loading 2GB of weights is comfortable or painful, which total RAM alone
+	// can't answer on a machine that's already been up for a week.
+	AvailableBytes uint64
 
 	OS         string
 	Arch       string
@@ -76,6 +82,26 @@ func (in Info) Memory() string {
 		return "unknown"
 	}
 	return Bytes(int64(in.MemoryBytes))
+}
+
+// Available is the free-ish memory, or "unknown" when the platform didn't say.
+func (in Info) Available() string {
+	if in.AvailableBytes == 0 {
+		return "unknown"
+	}
+	return Bytes(int64(in.AvailableBytes))
+}
+
+// Headroom is what a load has to fit inside: the OS's estimate of available
+// memory when we have one, and total RAM when we don't. Callers that are sizing
+// a model want a number either way — falling back to total is optimistic, but
+// it's optimistic in a direction the user can see for themselves on the row
+// above it.
+func (in Info) Headroom() uint64 {
+	if in.AvailableBytes > 0 {
+		return in.AvailableBytes
+	}
+	return in.MemoryBytes
 }
 
 // Platform is the GOOS/GOARCH pair the binary was built for.

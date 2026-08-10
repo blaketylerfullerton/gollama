@@ -21,7 +21,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
 func main() {

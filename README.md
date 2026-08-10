@@ -13,7 +13,7 @@ This is purely to help me understand inference and transformers better.
 
 Not optimal at all, just for learning. Meant to be a hackable, super simple project for understanding how LLM inference works from first principles.
 
-Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tui/` and `cmd/inspect`). Nothing in `model/` or `tokenizer/` imports either.
+Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tools/` and `cmd/inspect`). Nothing under `engine/` imports either.
 
 ## Running it
 
@@ -44,7 +44,7 @@ You get a welcome screen first — the llama on the left, the machine you're abo
  enter run the model · q quit
 ```
 
-Those two numbers are the ones that decide how this feels. Every matmul in `model/` is scalar Go on the CPU, so the core count is the speed and the resident size is whether it fits at all — worth seeing before the first token rather than inferring it from a disappointing one. Hardware detection is in `sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else.
+Those two numbers are the ones that decide how this feels. Every matmul in `engine/model/` is scalar Go on the CPU, so the core count is the speed and the resident size is whether it fits at all — worth seeing before the first token rather than inferring it from a disappointing one. Hardware detection is in `tools/sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else.
 
 Press enter and the run itself is unchanged:
 
@@ -124,7 +124,7 @@ go run . -trace run.jsonl           # record while the walkthrough runs
 go run ./cmd/inspect -f run.jsonl   # replay it
 ```
 
-Both render identical data, because both go through `trace/`: the live collector and the file writer share their event constructors.
+Both render identical data, because both go through `tools/trace/`: the live collector and the file writer share their event constructors.
 
 The **logit lens** is the reason this exists. It projects the residual stream through the LM head at *every* layer, so you can watch an answer get found:
 
@@ -201,12 +201,12 @@ The engine type-asserts for it, so a tracer that doesn't want intermediate predi
 ### How the pieces are separated
 
 ```text
-model/  ──Tracer──▶  print.go              terminal walkthrough
-                └─▶  trace/  ┬─ Writer  ──▶ JSONL file ─┐
-                             └─ Collector ── in memory ─┴─▶ cmd/inspect (TUI)
+engine/model/  ──Tracer──▶  tools/walkthrough/     terminal walkthrough
+                       └─▶  tools/trace/  ┬─ Writer  ──▶ JSONL file ─┐
+                                          └─ Collector ─ in memory ──┴─▶ cmd/inspect (TUI)
 ```
 
-One rule holds it together: **`model/` imports neither `trace/` nor `cmd/`.** The interface lives in `model/` because that's where it's consumed; every implementation lives outside. `TestEngineHasNoThirdPartyDependencies` and `TestModelDoesNotImportPresentation` parse the import graph and fail if either invariant breaks.
+One rule holds it together: **nothing under `engine/` imports `tools/` or `cmd/`.** That's what the two top-level folders are for. The interface lives in `engine/model/` because that's where it's consumed; every implementation lives outside. `TestEngineHasNoThirdPartyDependencies` and `TestEngineDoesNotImportTooling` parse the import graph and fail if either invariant breaks.
 
 `Writer` and `Collector` share their event constructors, so a live view and a replayed file are looking at byte-identical data and the UI needs only one rendering path. Both copy every slice they keep, as the contract requires.
 
@@ -260,7 +260,7 @@ Byte-level BPE, loaded from a HuggingFace `tokenizer.json`. Three details the fo
 
 **`VocabSize()` is not the model's `vocab_size`.** Checkpoints pad the embedding table for alignment: the tokenizer knows 151669 tokens while `config.json` declares 151936. The model can emit logits for ids that decode to nothing. Size embedding tables from config, not from the tokenizer.
 
-**The pretokenizer is hand-written, because RE2 can't do it.** `tokenizer.json` ships its own splitting regex, and Qwen3's uses negative lookahead (`\s+(?!\S)`) — which Go's `regexp` rejects by design, since it's RE2. So `splitQwen` in [pretokenize.go](tokenizer/pretokenize.go) implements that pattern's seven branches directly, including the backtracking the alternation depends on.
+**The pretokenizer is hand-written, because RE2 can't do it.** `tokenizer.json` ships its own splitting regex, and Qwen3's uses negative lookahead (`\s+(?!\S)`) — which Go's `regexp` rejects by design, since it's RE2. So `splitQwen` in [pretokenize.go](engine/tokenizer/pretokenize.go) implements that pattern's seven branches directly, including the backtracking the alternation depends on.
 
 `compilePretokenizer` recognises the pattern by string comparison and only claims exactness for the one actually implemented; anything else falls back and `PretokenizerIsExact()` reports `false`.
 
@@ -364,29 +364,41 @@ Despite the name, it doesn't run Llama yet — but it's close. Llama needs optio
 
 ## Layout
 
+Two top-level folders. `engine/` is the inference itself and depends on nothing
+outside the standard library. `tools/` is everything that makes a run watchable
+— and is where every third-party import lives. If you came here to read how a
+transformer works, `engine/` is the whole thing and you can ignore the rest.
+
 ```text
 main.go              loads a checkpoint (or a random model) and walks a prompt
                      through every stage, printing as it goes
-print.go             the walkthrough Tracer, plus vector/matrix pretty-printers
-tracers.go           fans trace events out to several consumers at once
-tokenizer/           byte-level BPE, hand-written pretokenizer, tokenizer.json
-trace/               the trace format: events, JSONL writer, in-memory collector
+
+engine/
+  tokenizer/         byte-level BPE, hand-written pretokenizer, tokenizer.json
+  model/
+    config.go        GPTConfig + HuggingFace config.json loader + validation
+    safetensors.go   .safetensors reader, F32/BF16/F16, sharded checkpoints
+    loader.go        maps Qwen3 tensor names onto the structs
+    trace.go         the Tracer hook the forward pass narrates through
+    gpt.go           the model, both forward paths, rotary table management
+    kvcache.go       cached keys and values, and what they cost per token
+    generate.go      prefill + decode loop, stop tokens, streaming
+    sample.go        greedy / temperature / top-k / top-p sampling
+    block.go         one transformer layer: pre-norm attention + pre-norm MLP
+    attention.go     grouped-query attention, causal attention, softmax
+    mlp.go           SwiGLU feed-forward
+    norm.go          RMSNorm with a learned scale
+    rotary.go        RoPE precompute + apply
+    linear.go        Linear layer and matmul
+    embedding.go     token id → vector lookup
+    ops.go           elementwise helpers (residual add)
+
+tools/
+  walkthrough/       the walkthrough Tracer, plus vector/matrix pretty-printers
+  trace/             the trace format: events, JSONL writer, in-memory collector,
+                     and the tee that fans events out to several consumers
+  tui/               welcome screen and model picker (bubbletea, lipgloss)
+  sysinfo/           what hardware this is about to run on
+
 cmd/inspect/         interactive TUI: type a prompt, run it, inspect the trace
-model/
-  config.go          GPTConfig + HuggingFace config.json loader + validation
-  safetensors.go     .safetensors reader, F32/BF16/F16, sharded checkpoints
-  loader.go          maps Qwen3 tensor names onto the structs
-  trace.go           the Tracer hook the forward pass narrates through
-  gpt.go             the model, both forward paths, rotary table management
-  kvcache.go         cached keys and values, and what they cost per token
-  generate.go        prefill + decode loop, stop tokens, streaming
-  sample.go          greedy / temperature / top-k / top-p sampling
-  block.go           one transformer layer: pre-norm attention + pre-norm MLP
-  attention.go       grouped-query attention, causal attention, softmax
-  mlp.go             SwiGLU feed-forward
-  norm.go            RMSNorm with a learned scale
-  rotary.go          RoPE precompute + apply
-  linear.go          Linear layer and matmul
-  embedding.go       token id → vector lookup
-  ops.go             elementwise helpers (residual add)
 ```

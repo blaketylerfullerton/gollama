@@ -16,7 +16,10 @@ func detect(in *Info) {
 		// arm64 kernels don't publish a model name; this is the closest thing.
 		in.CPU = firstField("/proc/cpuinfo", "Hardware")
 	}
-	in.MemoryBytes = memTotal()
+	in.MemoryBytes = memKB("MemTotal")
+	// MemAvailable is the kernel's own estimate of what a new allocation can
+	// have without swapping — better than free+cached, which overstates it.
+	in.AvailableBytes = memKB("MemAvailable")
 	in.Model = strings.TrimSpace(read("/sys/devices/virtual/dmi/id/product_name"))
 }
 
@@ -32,9 +35,9 @@ func firstField(path, key string) string {
 	return ""
 }
 
-// memTotal parses MemTotal out of /proc/meminfo, which is reported in kB.
-func memTotal() uint64 {
-	v := firstField("/proc/meminfo", "MemTotal")
+// memKB reads one /proc/meminfo field, which is reported in kB.
+func memKB(key string) uint64 {
+	v := firstField("/proc/meminfo", key)
 	kb, err := strconv.ParseUint(strings.TrimSuffix(v, " kB"), 10, 64)
 	if err != nil {
 		return 0

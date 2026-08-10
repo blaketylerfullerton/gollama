@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
 // fixture builds a small trace by hand. The whole point of the UI reading files

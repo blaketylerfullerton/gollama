@@ -5,9 +5,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/blaketylerfullerton/GoLlama/model"
-	"github.com/blaketylerfullerton/GoLlama/tokenizer"
-	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
+	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
 // Messages the engine goroutine sends to the UI.

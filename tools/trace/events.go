@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/blaketylerfullerton/GoLlama/model"
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
 )
 
 // Event construction lives here so the file Writer and the in-memory Collector

@@ -8,8 +8,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/blaketylerfullerton/GoLlama/tokenizer"
-	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
 type view int

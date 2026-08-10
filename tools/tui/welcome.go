@@ -20,7 +20,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/blaketylerfullerton/GoLlama/sysinfo"
+	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
 )
 
 // Choice is what the user did with the welcome screen.
@@ -81,8 +81,15 @@ var _ tea.Model = (*Welcome)(nil)
 // NewWelcome detects the hardware and scans checkpointDir. Both are done here,
 // once, rather than in View — View runs on every keystroke and every resize.
 func NewWelcome(checkpointDir string) *Welcome {
+	return NewWelcomeFor(sysinfo.Detect(), checkpointDir)
+}
+
+// NewWelcomeFor is NewWelcome with the hardware already detected, for callers
+// that are going to show more than one screen and shouldn't shell out to sysctl
+// once per screen.
+func NewWelcomeFor(sys sysinfo.Info, checkpointDir string) *Welcome {
 	return &Welcome{
-		sys:  sysinfo.Detect(),
+		sys:  sys,
 		ckpt: ScanCheckpoint(checkpointDir),
 		w:    100, h: 32,
 	}
@@ -149,8 +156,16 @@ func (w *Welcome) specs() string {
 	if s.GPU != "" {
 		rows = append(rows, row("gpu", s.GPU))
 	}
+	// Free memory is shown beside the total because it's the one that decides
+	// whether a checkpoint loads comfortably, and on a machine that's been up
+	// for a week the two are nothing like each other.
+	memory := row("memory", s.Memory())
+	if s.AvailableBytes > 0 {
+		memory = styledRow("memory", valueStyle.Render(s.Memory())+
+			dimStyle.Render("  "+s.Available()+" free"))
+	}
 	rows = append(rows,
-		row("memory", s.Memory()),
+		memory,
 		row("platform", s.Platform()),
 		row("runtime", fmt.Sprintf("%s · GOMAXPROCS %d", s.GoVersion, s.GOMAXPROCS)),
 		"",
@@ -190,7 +205,7 @@ func (w *Welcome) checkpointRows() []string {
 
 func (w *Welcome) footer() string {
 	keys := []string{
-		keyStyle.Render("enter") + dimStyle.Render(" run the model"),
+		keyStyle.Render("enter") + dimStyle.Render(" choose a model"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}
 	return strings.Join(keys, dimStyle.Render(" · ")) + "\n " +
@@ -199,7 +214,7 @@ func (w *Welcome) footer() string {
 
 // --- small formatting helpers ------------------------------------------------
 
-func heading(s string) string { return hotStyle.Render(s) }
+func heading(s string) string { return headingStyle.Render(s) }
 
 // row is a label/value pair with the labels aligned into a column. An empty
 // value reads as "unknown" rather than as a blank line, since on an unsupported
@@ -223,15 +238,4 @@ func indent(s string, n int) string {
 		lines[i] = pad + l
 	}
 	return strings.Join(lines, "\n")
-}
-
-// ShowWelcome runs the welcome screen and reports what the user chose. It uses
-// the alternate screen so the splash is gone once it returns and whatever runs
-// next starts on a clean terminal.
-func ShowWelcome(checkpointDir string) (Choice, error) {
-	w := NewWelcome(checkpointDir)
-	if _, err := tea.NewProgram(w, tea.WithAltScreen()).Run(); err != nil {
-		return Quit, err
-	}
-	return w.Choice(), nil
 }

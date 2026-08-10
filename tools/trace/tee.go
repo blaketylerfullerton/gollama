@@ -1,10 +1,10 @@
-package main
+package trace
 
 import (
-	"github.com/blaketylerfullerton/GoLlama/model"
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
 )
 
-// tracerFor fans trace events out to several tracers, so one run can both print
+// Tee fans trace events out to several tracers, so one run can both print
 // a walkthrough and write a trace file.
 //
 // The subtlety is the logit lens. The engine decides whether to compute it by
@@ -13,7 +13,7 @@ import (
 // value implements that interface only when at least one child would actually
 // use it. A single child is returned unwrapped, which preserves its exact
 // interface set.
-func tracerFor(children ...model.Tracer) model.Tracer {
+func Tee(children ...model.Tracer) model.Tracer {
 	switch len(children) {
 	case 0:
 		return nil

@@ -6,19 +6,28 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/blaketylerfullerton/GoLlama/trace"
+	"github.com/blaketylerfullerton/GoLlama/tools/amber"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
+// One hue, ten brightnesses, and brightness always means the same thing — see
+// tools/amber. This screen is where that rule earns its keep: the attention
+// matrix and the logit-lens bars are both coloured by calling amber.Of on the
+// number itself, so the chrome around them has to stay honest about its own
+// level or it would compete with the data for the eye.
 var (
-	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62"))
-	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	keyStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("81"))
-	hotStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	selStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("238"))
-	headerRowStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("250"))
-	tabStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	activeTabStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("231")).Background(lipgloss.Color("62"))
-	errStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203"))
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.At(amber.Void)).Background(amber.At(amber.Core))
+	dimStyle   = amber.Fg(amber.Faint)
+	keyStyle   = amber.Fg(amber.Live)
+	hotStyle   = amber.Fg(amber.Hot).Bold(true)
+	selStyle   = lipgloss.NewStyle().Bold(true).Foreground(amber.At(amber.Peak)).Background(amber.At(amber.Ember))
+	// A column heading is chrome, so it stays down at Faint and lets bold do
+	// the work of standing out. Brightening it would put it level with the
+	// numbers underneath it, and those are the point.
+	headerRowStyle = amber.Fg(amber.Faint).Bold(true)
+	tabStyle       = amber.Fg(amber.Faint)
+	activeTabStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.At(amber.Void)).Background(amber.At(amber.Core))
+	errStyle       = amber.Fg(amber.Peak).Bold(true)
 )
 
 // --- logit lens -------------------------------------------------------------
@@ -126,8 +135,12 @@ func (a *app) attentionView() string {
 		for j := range e.Weights {
 			if j > i {
 				// Never computed, not zeroed — the mask means these scores
-				// don't exist.
-				b.WriteString(dimStyle.Render(fmt.Sprintf("%9s", "·")))
+				// don't exist. Drawn at the bottom of the ramp, below anything
+				// a real weight can reach: on a scale where brightness is
+				// magnitude, the absence of a number can't be allowed to
+				// outshine a small one. The glyph is what says "masked"; the
+				// darkness only says "nothing to see".
+				b.WriteString(amber.Fg(amber.Ash).Render(fmt.Sprintf("%9s", "·")))
 				continue
 			}
 			w := row[j]
@@ -151,23 +164,15 @@ func (a *app) attentionView() string {
 
 // heat colours a weight by magnitude, so a pattern is visible before any number
 // is read.
+//
+// It was a six-colour rainbow — grey, blue, green, yellow, red — which had the
+// flaw every rainbow scale has: the steps aren't ordered by anything the eye
+// does automatically, so you can see that two cells differ without being able
+// to see which one is larger, and reading the matrix meant consulting a legend
+// you had to hold in your head. On the ramp, larger is brighter, and a row's
+// shape falls out of it at a glance.
 func heat(w float32) lipgloss.Style {
-	var c string
-	switch {
-	case w < 0.02:
-		c = "238"
-	case w < 0.10:
-		c = "245"
-	case w < 0.25:
-		c = "39" // blue
-	case w < 0.50:
-		c = "42" // green
-	case w < 0.75:
-		c = "220" // yellow
-	default:
-		c = "203" // red
-	}
-	return lipgloss.NewStyle().Foreground(lipgloss.Color(c))
+	return lipgloss.NewStyle().Foreground(amber.Of(float64(w)))
 }
 
 // --- stages -----------------------------------------------------------------
@@ -218,11 +223,15 @@ func (a *app) stagesView() string {
 
 // --- small helpers ----------------------------------------------------------
 
+// bar draws a fraction as a filled row. The fill is coloured by the same
+// fraction it's showing, so a confident prediction is both longer and brighter
+// than a hedged one — the two encodings agree, and the column of bars can be
+// skimmed for brightness alone.
 func bar(frac float64, width int) string {
 	n := int(frac * float64(width))
 	n = max(0, min(width, n))
-	return lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Render(strings.Repeat("█", n)) +
-		dimStyle.Render(strings.Repeat("░", width-n))
+	return lipgloss.NewStyle().Foreground(amber.Of(frac)).Render(strings.Repeat("█", n)) +
+		amber.Fg(amber.Ash).Render(strings.Repeat("░", width-n))
 }
 
 func floats(v []float32, n int) string {

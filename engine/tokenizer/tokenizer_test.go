@@ -8,7 +8,7 @@ import (
 
 // realCheckpoint is where the Qwen3 download lands. Tests that need it skip
 // when it's absent, so the suite still passes on a fresh clone.
-const realCheckpoint = "../checkpoints/qwen3-0.6b"
+const realCheckpoint = "../../checkpoints/qwen3-0.6b"
 
 func writeTokenizerJSON(t *testing.T, body string) string {
 	t.Helper()

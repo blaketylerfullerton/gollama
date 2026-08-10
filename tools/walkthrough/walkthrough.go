@@ -1,4 +1,8 @@
-package main
+// Package walkthrough narrates a forward pass to stdout: shapes, intermediate
+// vectors, rotary tables and attention grids, plus a magnitude summary at the
+// end. It is a model.Tracer implementation and nothing in engine/ knows it
+// exists — with no tracer attached, the hooks it plugs into are no-ops.
+package walkthrough
 
 import (
 	"fmt"
@@ -114,18 +118,24 @@ func meanNorm(x [][]float32) float64 {
 	return sum / float64(len(x))
 }
 
-// --- the walkthrough tracer -------------------------------------------------
+// --- the Walkthrough tracer -------------------------------------------------
 
-// walkthrough implements model.Tracer by narrating a forward pass to stdout.
+// Walkthrough implements model.Tracer by narrating a forward pass to stdout.
 //
 // A full trace of every layer would be unreadable, so it prints detail for one
 // block and one head, and records a magnitude for every stage to summarize at
 // the end.
-type walkthrough struct {
+type Walkthrough struct {
 	labels      []string // token text per position, for grid axes
 	detailLayer int
 	detailHead  int
 	stages      []stageStat
+}
+
+// New returns a Walkthrough that narrates layer 0, head 0. labels is the token
+// text per position, used for the attention grid's axes.
+func New(labels []string) *Walkthrough {
+	return &Walkthrough{labels: labels, detailLayer: 0, detailHead: 0}
 }
 
 type stageStat struct {
@@ -136,11 +146,11 @@ type stageStat struct {
 
 // verbose reports whether this layer gets the full treatment. Layer -1 is used
 // for stages outside the block stack, which always print.
-func (w *walkthrough) verbose(layer int) bool {
+func (w *Walkthrough) verbose(layer int) bool {
 	return layer < 0 || layer == w.detailLayer
 }
 
-func (w *walkthrough) Stage(layer int, name string, x [][]float32) {
+func (w *Walkthrough) Stage(layer int, name string, x [][]float32) {
 	w.stages = append(w.stages, stageStat{layer, name, meanNorm(x)})
 
 	if !w.verbose(layer) {
@@ -156,13 +166,13 @@ func (w *walkthrough) Stage(layer int, name string, x [][]float32) {
 	fmt.Println(vecRow("tok 0", x[0], previewDims))
 }
 
-func (w *walkthrough) Note(layer int, format string, args ...any) {
+func (w *Walkthrough) Note(layer int, format string, args ...any) {
 	if w.verbose(layer) {
 		fmt.Printf("  %s\n", fmt.Sprintf(format, args...))
 	}
 }
 
-func (w *walkthrough) Rotary(layer, head int, before, after []float32) {
+func (w *Walkthrough) Rotary(layer, head int, before, after []float32) {
 	if layer == w.detailLayer && head == w.detailHead {
 		fmt.Println()
 		PrintVecDiff(fmt.Sprintf("rotary on q — layer %d, head %d, last position", layer, head),
@@ -170,7 +180,7 @@ func (w *walkthrough) Rotary(layer, head int, before, after []float32) {
 	}
 }
 
-func (w *walkthrough) Attention(layer, head int, weights [][]float32) {
+func (w *Walkthrough) Attention(layer, head int, weights [][]float32) {
 	if layer != w.detailLayer || head != w.detailHead {
 		return
 	}
@@ -211,21 +221,21 @@ func (w *walkthrough) Attention(layer, head int, weights [][]float32) {
 }
 
 // label renders a token as a short, terminal-safe column heading.
-func (w *walkthrough) label(i int) string {
+func (w *Walkthrough) label(i int) string {
 	if i >= len(w.labels) {
 		return fmt.Sprintf("t%d", i)
 	}
-	r := []rune(sanitize(w.labels[i]))
+	r := []rune(Sanitize(w.labels[i]))
 	if len(r) > 8 {
 		return string(r[:8])
 	}
 	return string(r)
 }
 
-// sanitize makes whitespace visible. A token's leading space is significant and
+// Sanitize makes whitespace visible. A token's leading space is significant and
 // otherwise impossible to see, which turns " the" and "the" — two different
 // tokens — into the same thing on screen.
-func sanitize(s string) string {
+func Sanitize(s string) string {
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	s = strings.ReplaceAll(s, "\t", "\\t")
 	return strings.ReplaceAll(s, " ", "_")
@@ -234,7 +244,7 @@ func sanitize(s string) string {
 // PrintSummary shows every stage's magnitude in order. Reading it top to
 // bottom is the clearest picture of what a transformer actually does to a
 // vector: branch off, normalize, add the result back, repeat.
-func (w *walkthrough) PrintSummary() {
+func (w *Walkthrough) PrintSummary() {
 	// A 28-layer model produces ~87 stages. Showing the head and tail is enough
 	// to read the trend; the middle is more of the same.
 	const maxRows = 24
