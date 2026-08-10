@@ -74,6 +74,9 @@ type Welcome struct {
 	ckpt   Checkpoint
 	choice Choice
 	w, h   int
+	// tick counts animation frames rather than storing one, so the llama's two
+	// motions can be derived from it independently. See llamaFrameAt.
+	tick int
 }
 
 var _ tea.Model = (*Welcome)(nil)
@@ -98,12 +101,19 @@ func NewWelcomeFor(sys sysinfo.Info, checkpointDir string) *Welcome {
 // Choice reports what the user picked. Valid once the program has returned.
 func (w *Welcome) Choice() Choice { return w.choice }
 
-func (w *Welcome) Init() tea.Cmd { return nil }
+// Init starts the llama animating. Nothing else on this screen moves, so if the
+// art is never shown the ticks are wasted — but a timer at llamaInterval costs
+// less than deciding per frame whether it's needed, and View is the only thing
+// that knows the terminal is too narrow for the art.
+func (w *Welcome) Init() tea.Cmd { return llamaTick() }
 
 func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		w.w, w.h = msg.Width, msg.Height
+	case llamaTickMsg:
+		w.tick++
+		return w, llamaTick()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "enter", " ":
@@ -117,30 +127,55 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return w, nil
 }
 
-func (w *Welcome) View() string {
-	art := llama()
-	specs := panelStyle.Render(w.specs())
+// minSpecsWidth is the narrowest the panel can be rendered and still hold its
+// longest line — the huggingface-cli invocation, which is the one thing on the
+// screen that has to be copied verbatim.
+const minSpecsWidth = 48
 
-	// Side by side when there's room for both, stacked when there isn't. The
-	// threshold is the art plus the panel plus the gap between them.
-	body := lipgloss.JoinHorizontal(lipgloss.Top, art, "  ", specs)
-	if w.w > 0 && lipgloss.Width(body) > w.w {
-		body = specs
-		if w.h > len(llamaArt)+16 {
-			body = lipgloss.JoinVertical(lipgloss.Left, art, "", specs)
-		}
+const subtitle = "a transformer you can read, one token at a time"
+
+func (w *Welcome) View() string {
+	bar := w.bar()
+	rows := bodyRows(w.h, bar)
+	inner := max(w.w-2*screenMargin, minSpecsWidth)
+
+	// Side by side when there's room for both, stacked when there isn't, and
+	// stacked with no art at all when even that doesn't fit — the llama says
+	// nothing the panel doesn't, so it's the first thing to go.
+	//
+	// Either way the panel takes every column the art leaves, so the layout
+	// reaches the right-hand edge of the terminal rather than ending wherever
+	// the longest hostname happens to.
+	if side := inner - llamaWidth - 2; side >= minSpecsWidth {
+		// The llama is centred against the column rather than hung from its
+		// top: the box is now as tall as the terminal, and art pinned to the
+		// top of it leaves the bottom half of the screen visibly empty.
+		body := lipgloss.JoinHorizontal(lipgloss.Center, llama(w.tick), "  ", w.column(side, rows))
+		return screen(w.w, w.h, body, bar)
 	}
 
-	return strings.Join([]string{
+	if rows > llamaHeight+12 && llamaWidth <= inner {
+		body := lipgloss.JoinVertical(lipgloss.Left, llama(w.tick), "",
+			w.column(inner, rows-llamaHeight-1))
+		return screen(w.w, w.h, body, bar)
+	}
+	return screen(w.w, w.h, w.column(inner, rows), bar)
+}
+
+// column is the title with the specs panel under it, filling rows.
+//
+// The title sits on top of the box rather than off in the corner of the screen.
+// It names what the panel beneath it is describing, and a heading with its body
+// directly under it reads as one thing, where a heading alone at the far left
+// reads as page furniture.
+func (w *Welcome) column(width, rows int) string {
+	head := hero("GoLlama", subtitle, width)
+	return lipgloss.JoinVertical(lipgloss.Left,
+		head,
 		"",
-		" " + titleStyle.Render("GoLlama") + " " +
-			subtitleStyle.Render("a transformer you can read, one token at a time"),
-		"",
-		indent(body, 1),
-		"",
-		" " + w.footer(),
-		"",
-	}, "\n")
+		// Minus the title and the blank line under it, so the box ends where
+		// the body does.
+		stretch(panelStyle.Width(width-2), rows-lipgloss.Height(head)-1, w.specs()))
 }
 
 // specs is the right-hand column: what this machine is, then what's on disk to
@@ -148,7 +183,7 @@ func (w *Welcome) View() string {
 func (w *Welcome) specs() string {
 	s := w.sys
 	rows := []string{
-		heading("this machine"),
+		heading("This machine"),
 		row("host", s.Host),
 		row("chip", s.CPU),
 		row("cores", s.CoreSummary()),
@@ -169,7 +204,7 @@ func (w *Welcome) specs() string {
 		row("platform", s.Platform()),
 		row("runtime", fmt.Sprintf("%s · GOMAXPROCS %d", s.GoVersion, s.GOMAXPROCS)),
 		"",
-		heading("weights"),
+		heading("Weights"),
 	)
 	rows = append(rows, w.checkpointRows()...)
 	return strings.Join(rows, "\n")
@@ -203,13 +238,15 @@ func (w *Welcome) checkpointRows() []string {
 	}
 }
 
-func (w *Welcome) footer() string {
+// bar is the toolbar along the bottom: the two keys this screen answers to on
+// the left, and the other way into the program on the right.
+func (w *Welcome) bar() string {
 	keys := []string{
 		keyStyle.Render("enter") + dimStyle.Render(" choose a model"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}
-	return strings.Join(keys, dimStyle.Render(" · ")) + "\n " +
-		dimStyle.Render("go run ./cmd/inspect to step through a pass")
+	return toolbar(w.w, strings.Join(keys, dimStyle.Render(" · ")),
+		dimStyle.Render("go run ./cmd/inspect to step through a pass"))
 }
 
 // --- small formatting helpers ------------------------------------------------

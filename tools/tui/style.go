@@ -17,6 +17,10 @@ var (
 	titleStyle = lipgloss.NewStyle().Bold(true).
 			Foreground(amber.At(amber.Void)).Background(amber.At(amber.Core)).
 			Padding(0, 1)
+	// The wordmark takes the undiluted hue as ink rather than as a field: it's
+	// large enough that reversing it would put a block of solid colour a
+	// quarter the size of the screen behind two words.
+	wordmarkStyle = amber.Fg(amber.Core)
 	subtitleStyle = amber.Fg(amber.Faint).Italic(true)
 	dimStyle      = amber.Fg(amber.Faint)
 	labelStyle    = amber.Fg(amber.Faint).Width(11)
@@ -33,6 +37,21 @@ var (
 	panelStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).BorderForeground(amber.At(amber.Ember)).
 			Padding(0, 2)
+
+	// The toolbar takes the same border as the panels — it's part of the same
+	// frame — but a step dimmer. It says the same thing on every screen, so it
+	// shouldn't compete for attention with the numbers above it.
+	toolbarStyle = panelStyle.BorderForeground(amber.At(amber.Ash))
+)
+
+var (
+	// The two speakers in the transcript get the same treatment as any other
+	// label on screen: a step below the values they introduce. Colour is the
+	// only thing that tells "you" from "model" apart at a glance, so the two
+	// take opposite ends of the label range rather than sharing one.
+	youStyle        = amber.Fg(amber.Bright).Bold(true)
+	modelStyle      = amber.Fg(amber.Faint).Bold(true)
+	modelReplyStyle = amber.Fg(amber.Live)
 )
 
 var (
@@ -43,24 +62,19 @@ var (
 	memLabelStyle = amber.Fg(amber.Faint).Width(13)
 )
 
-// The two top panels are fixed width so their contents can be laid out as
-// columns of numbers rather than reflowed on every resize. Below the combined
-// width they stack instead, which is what the welcome screen already does.
+// The memory panel is a fixed width — it's columns of numbers, and reflowing
+// those gains nothing — so it keeps its size at every terminal width and the
+// list beside it takes whatever is left. Below the two of them side by side
+// they stack instead, which is what the welcome screen already does.
 //
 // These are content widths — what a line inside the panel may occupy. The
 // rendered panel is 6 cells wider: two of padding on each side, and one of
 // border. Every string in picker.go is written to fit one of them exactly, so
 // changing a number here means re-checking the lines that go inside it.
 const (
-	listInnerWidth = 46
+	listInnerWidth = 46 // the narrowest the list is worth drawing, not its width
 	memInnerWidth  = 28
 	panelChrome    = 6 // padding (4) + border (2)
-
-	// The two side by side, with a single cell between them.
-	topWidth = listInnerWidth + panelChrome + 1 + memInnerWidth + panelChrome
 )
 
-var (
-	listPanelStyle = panelStyle.Width(listInnerWidth + 4)
-	memPanelStyle  = panelStyle.Width(memInnerWidth + 4)
-)
+var memPanelStyle = panelStyle.Width(memInnerWidth + 4)

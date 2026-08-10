@@ -11,11 +11,53 @@ import (
 )
 
 // The art is laid beside a panel, so a single short line would leave a notch in
-// the layout that only shows up at runtime.
-func TestLlamaLinesAreEqualWidth(t *testing.T) {
-	for i, line := range llamaArt {
-		if w := lipgloss.Width(line); w != llamaWidth {
-			t.Errorf("line %d is %d cells wide, want %d: %q", i, w, llamaWidth, line)
+// the layout that only shows up at runtime. Every frame has to be the same size
+// as every other one too, or the panel beside it would jump on each tick.
+func TestLlamaFramesAreEqualSize(t *testing.T) {
+	for f, frame := range llamaFrames {
+		if len(frame) != llamaHeight {
+			t.Errorf("frame %d is %d rows, want %d", f, len(frame), llamaHeight)
+		}
+		for i, line := range frame {
+			if w := lipgloss.Width(line); w != llamaWidth {
+				t.Errorf("frame %d line %d is %d cells wide, want %d: %q", f, i, w, llamaWidth, line)
+			}
+		}
+	}
+}
+
+// Every tick has to land on a frame that exists, whatever the counter has got up
+// to — the nod and the blink index into the same slice from different clocks.
+func TestLlamaFrameAtCoversEveryTick(t *testing.T) {
+	seen := map[string]bool{}
+	for tick := range nodTicks * blinkPeriod * 2 {
+		seen[strings.Join(llamaFrameAt(tick), "")] = true
+	}
+	if len(seen) != len(llamaFrames) {
+		t.Errorf("the animation only ever shows %d of the %d frames", len(seen), len(llamaFrames))
+	}
+}
+
+// A glyph whose rows disagree about their width shifts every letter after it
+// along by the difference, which turns the wordmark into a staircase.
+func TestWordmarkGlyphsAreRectangular(t *testing.T) {
+	for r, g := range glyphs {
+		want := lipgloss.Width(g[0])
+		for i, row := range g {
+			if got := lipgloss.Width(row); got != want {
+				t.Errorf("%q row %d is %d cells, want %d: %q", r, i, got, want, row)
+			}
+		}
+	}
+
+	art, width := wordmark("GoLlama")
+	lines := strings.Split(art, "\n")
+	if len(lines) != wordmarkRows {
+		t.Errorf("wordmark is %d rows, want %d", len(lines), wordmarkRows)
+	}
+	for i, line := range lines {
+		if got := lipgloss.Width(line); got != width {
+			t.Errorf("row %d is %d cells, want the reported %d", i, got, width)
 		}
 	}
 }
@@ -108,7 +150,7 @@ func TestViewFitsNarrowTerminal(t *testing.T) {
 func TestViewShowsHardware(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	view := w.View()
-	for _, want := range []string{"this machine", "cores", "memory", "platform", "weights"} {
+	for _, want := range []string{"This machine", "cores", "memory", "platform", "Weights"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}

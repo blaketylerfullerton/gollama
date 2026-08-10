@@ -285,6 +285,57 @@ func TestMemoryPanelFollowsTheCursor(t *testing.T) {
 	}
 }
 
+// The recommendation is the biggest model that still fits comfortably — under
+// half the free memory, the same threshold the gauge calls "room to spare". On
+// the 8GB-free test machine, 1.7B costs 91% of that and 0.6B costs 39%, so 0.6B
+// is the one worth pointing at even though 1.7B is technically bigger.
+func TestPickerRecommendsTheBiggestComfortableFit(t *testing.T) {
+	p := NewPicker(t.TempDir(), testSys())
+	rec := p.recommended()
+	if rec < 0 {
+		t.Fatal("nothing was recommended on a machine with headroom to spare")
+	}
+	if got := p.models[rec].Name; got != "Qwen3-0.6B" {
+		t.Errorf("recommended %q, want Qwen3-0.6B", got)
+	}
+}
+
+// The demo model always fits — it's a few kilobytes — so if it were eligible it
+// would always be "the" recommendation and the column would never point at a
+// real model.
+func TestPickerNeverRecommendsTheDemoModel(t *testing.T) {
+	p := &Picker{sys: sysinfo.Info{MemoryBytes: 1 << 20, AvailableBytes: 1 << 20}, models: []Model{demoModel}}
+	if rec := p.recommended(); rec != -1 {
+		t.Errorf("recommended index %d on a list of nothing but the demo model, want -1", rec)
+	}
+}
+
+// A model past its headroom is a decision, not a suggestion — "too large" has
+// to appear somewhere on the row, and the biggest model on a small machine is
+// guaranteed to trigger it.
+func TestPickerFlagsTooLargeModels(t *testing.T) {
+	p := NewPicker(t.TempDir(), testSys()) // 8GB free
+	view := p.View()
+	if !strings.Contains(view, "too large") {
+		t.Error("no model on the list was flagged too large, on a machine that can't fit the 8B")
+	}
+	if !strings.Contains(view, "recommended") {
+		t.Error("nothing was recommended even though smaller models fit comfortably")
+	}
+}
+
+// A machine that didn't report its memory has nothing to judge fit by, so the
+// column has to say so rather than guess.
+func TestPickerFitUnknownWithoutMemoryInfo(t *testing.T) {
+	p := &Picker{sys: sysinfo.Info{}, models: Catalog(t.TempDir())}
+	if rec := p.recommended(); rec != -1 {
+		t.Errorf("recommended index %d with no memory info to judge by, want -1", rec)
+	}
+	if got := p.fit(p.models[0], false); !strings.Contains(got, "—") {
+		t.Errorf("fit() = %q, want the unknown marker", got)
+	}
+}
+
 // The three verdicts are the point of the gauge: "fits", "most of what's free"
 // and "won't fit" are three different decisions.
 func TestGaugeVerdicts(t *testing.T) {
@@ -342,6 +393,10 @@ func TestPickerViewShowsTheEssentials(t *testing.T) {
 // or the screen is describing something the user can't act on.
 func TestPickerShowsTheDownloadCommand(t *testing.T) {
 	p := NewPicker(t.TempDir(), testSys())
+	// An explicit size: three panels of this much content need about 34 rows,
+	// and below that the description is clipped from the bottom on purpose —
+	// see the trimming in View.
+	p.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	view := p.View()
 	if !strings.Contains(view, "huggingface-cli download Qwen/Qwen3-0.6B") {
 		t.Error("no download command for a model that isn't installed")
@@ -371,20 +426,92 @@ func TestPickerFitsNarrowTerminal(t *testing.T) {
 	}
 }
 
-// A checkpoint directory full of models must not push the panels off screen.
+// A checkpoint directory full of models must not push the panels off screen on
+// a terminal that has no room for them all.
 func TestPickerScrollsLongList(t *testing.T) {
 	root := t.TempDir()
 	for _, name := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
 		checkpoint(t, root, name, qwen3Tiny)
 	}
 	p := NewPicker(root, testSys())
-	p.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	p.Update(tea.WindowSizeMsg{Width: 100, Height: 28})
 
-	if n := strings.Count(p.list(), "\n"); n > maxVisibleRows+3 {
+	if n := strings.Count(p.list(80), "\n"); n > minVisibleRows+3 {
 		t.Errorf("list is %d lines for %d models, want it windowed", n+1, len(p.models))
 	}
 	p.Update(key("G"))
-	if !strings.Contains(p.list(), p.Selection().Name) {
+	if !strings.Contains(p.list(80), p.Selection().Name) {
 		t.Error("the cursor scrolled off the visible window")
+	}
+
+	// The point of windowing is the height, so a terminal with the room should
+	// spend it: all fifteen models at once rather than eight and a footnote.
+	p.Update(tea.WindowSizeMsg{Width: 100, Height: 60})
+	for _, m := range p.models {
+		if !strings.Contains(p.list(80), m.Name) {
+			t.Errorf("%q is still scrolled off a 60-row terminal", m.Name)
+		}
+	}
+	if strings.Contains(p.list(80), "more below") {
+		t.Error("the list is still windowed on a terminal tall enough for all of it")
+	}
+}
+
+// Both screens run on the alternate screen, so a view shorter than the terminal
+// leaves blank rows below it and one taller than the terminal scrolls the top
+// off. It has to be exactly the height it was given.
+func TestScreensFillTheTerminal(t *testing.T) {
+	root := t.TempDir()
+	checkpoint(t, root, "qwen3-0.6b", qwen3Tiny)
+
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 80, Height: 24},
+		{Width: 100, Height: 40},
+		{Width: 200, Height: 60},
+		{Width: 60, Height: 20},
+	} {
+		views := map[string]func() string{}
+
+		p := NewPicker(root, testSys())
+		p.Update(size)
+		views["picker"] = p.View
+
+		w := NewWelcome("checkpoints/qwen3-0.6b")
+		w.Update(size)
+		views["welcome"] = w.View
+
+		for name, view := range views {
+			lines := strings.Split(view(), "\n")
+			if len(lines) != size.Height {
+				t.Errorf("%s at %dx%d is %d rows, want %d",
+					name, size.Width, size.Height, len(lines), size.Height)
+			}
+			for _, line := range lines {
+				if got := lipgloss.Width(line); got > size.Width {
+					t.Errorf("%s at %dx%d has a %d-cell line: %q",
+						name, size.Width, size.Height, got, line)
+				}
+			}
+		}
+	}
+}
+
+// Filling the height is only half of it: a panel that stops two thirds of the
+// way across a wide terminal looks like the layout gave up.
+func TestPickerUsesTheFullWidth(t *testing.T) {
+	root := t.TempDir()
+	checkpoint(t, root, "qwen3-0.6b", qwen3Tiny)
+
+	p := NewPicker(root, testSys())
+	p.Update(tea.WindowSizeMsg{Width: 160, Height: 45})
+
+	var widest int
+	for _, line := range strings.Split(p.View(), "\n") {
+		widest = max(widest, lipgloss.Width(line))
+	}
+	// The margin down each side is the only width the layout may leave unused,
+	// and the widest line starts after the left one.
+	if want := 160 - screenMargin; widest != want {
+		t.Errorf("widest line is %d cells on a 160-cell terminal, want %d", widest, want)
 	}
 }

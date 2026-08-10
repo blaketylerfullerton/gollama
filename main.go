@@ -59,7 +59,8 @@ func main() {
 	// still works, and skipped with -no-splash, in which case the default
 	// checkpoint is used if it's there.
 	dir := checkpointDir
-	if !*noSplash && isTerminal(os.Stdout) {
+	interactive := !*noSplash && isTerminal(os.Stdout)
+	if interactive {
 		chosen, ok, err := tui.Start(checkpointDir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
@@ -75,6 +76,18 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Coming through the splash lands on the chat screen — the picker just
+	// answered "what to run", and talking to it is the point. -no-splash and
+	// piped output keep the printed walkthrough, since there's no screen to
+	// chat on and a script reading stdout wants the old fixed output anyway.
+	if interactive {
+		if err := runChatUI(s); err != nil {
+			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 	if err := run(s, *verbose, *tracePath); err != nil {
 		fmt.Fprintf(os.Stderr, "gollama: %v\n", err)

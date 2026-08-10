@@ -39,9 +39,15 @@ const (
 // nothing about the run you're about to start.
 const contextEstimate = 4096
 
-// maxVisibleRows caps the list so a directory full of checkpoints can't push
-// the panels off the bottom of the terminal.
-const maxVisibleRows = 8
+// minVisibleRows is the shortest the list is allowed to get. A directory full
+// of checkpoints must not push the panels off the bottom of the terminal, but
+// windowed down past this the list is more scrolling than list.
+const minVisibleRows = 8
+
+// listChrome is every row the screen spends on something other than a model:
+// the title block, the list panel's border and heading, the description panel
+// under it, and the footer. What's left at the current height is the list.
+const listChrome = 22
 
 // Picker is the bubbletea model for the model-selection screen.
 type Picker struct {
@@ -87,6 +93,9 @@ func (p *Picker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		p.w, p.h = msg.Width, msg.Height
+		// A resize changes how many rows the list has, so the window it was
+		// scrolled to may no longer contain the cursor.
+		p.scroll()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
@@ -123,14 +132,25 @@ func (p *Picker) move(d int) {
 	p.scroll()
 }
 
+// visibleRows is how many models the list shows at the current height. A tall
+// terminal gets the whole catalog without scrolling, which is the point of
+// filling the screen rather than drawing a fixed-size card in the corner of it.
+func (p *Picker) visibleRows() int {
+	return min(max(p.h-listChrome, minVisibleRows), max(len(p.models), 1))
+}
+
 // scroll keeps the cursor inside the visible window.
 func (p *Picker) scroll() {
+	rows := p.visibleRows()
 	switch {
 	case p.cursor < p.top:
 		p.top = p.cursor
-	case p.cursor >= p.top+maxVisibleRows:
-		p.top = p.cursor - maxVisibleRows + 1
+	case p.cursor >= p.top+rows:
+		p.top = p.cursor - rows + 1
 	}
+	// A window that just grew can leave empty rows at the bottom of the list
+	// while models are still scrolled off the top. Pull it back down onto them.
+	p.top = max(0, min(p.top, len(p.models)-rows))
 }
 
 // choose accepts the highlighted model, or explains why it can't. A row whose
@@ -148,48 +168,97 @@ func (p *Picker) choose() tea.Cmd {
 }
 
 func (p *Picker) View() string {
-	// One cell of margin on each side, matching the welcome screen.
-	inner := max(p.w-2, 24)
+	// One cell of margin on each side, matching the welcome screen; two rows
+	// off the top for the title and the blank line under it.
+	bar := p.bar()
+	inner := max(p.w-2*screenMargin, 24)
+	rows := bodyRows(p.h, bar) - 2
 
-	// The memory column is always the taller of the two, so the list is padded
-	// out to match it. Without that the border under the list stops halfway up
-	// the panel beside it, which reads as a rendering bug rather than as a
-	// short list.
+	// The list is the one panel that's every model at once rather than a
+	// reading about the one under the cursor, so it's the one that gets the
+	// full width — a table of numbers is exactly as wide as its widest row
+	// wherever that lands, and stopping short of the terminal edge for no
+	// reason reads as an accident.
+	list := panelStyle.Width(inner - 2).Render(p.list(inner - 6)) // less border + padding
+
+	// Below it, the model's own summary beside what running it costs on this
+	// machine — the memory column is a fixed width of number columns, so the
+	// description takes whatever's left rather than the two splitting the row
+	// down the middle.
 	mem := memPanelStyle.Render(p.memory())
-	list := listPanelStyle.Height(lipgloss.Height(mem) - 2).Render(p.list())
+	room := rows - lipgloss.Height(list)
+	bottom := p.bottom(inner, room, mem)
 
-	top := lipgloss.JoinHorizontal(lipgloss.Top, list, " ", mem)
-	if topWidth > inner {
-		top = lipgloss.JoinVertical(lipgloss.Left, listPanelStyle.Render(p.list()), mem)
+	// Same shape as the welcome screen: the title sits directly on top of the
+	// block it names rather than off in the corner of the terminal.
+	body := lipgloss.JoinVertical(lipgloss.Left,
+		header("GoLlama", "choose a model to start with", lipgloss.Width(list)), "", list, bottom)
+	return screen(p.w, p.h, body, bar)
+}
+
+// bottom lays the description beside the memory column, each stretched to the
+// taller of the two so neither panel's border stops short of the other's. Below
+// the width the memory column needs beside it, they stack instead — same
+// threshold the welcome screen uses for the llama.
+//
+// When there isn't room for rows lines of prose, paragraphs come off the
+// description one at a time until what's left fits — see about.
+func (p *Picker) bottom(width, rows int, mem string) string {
+	descWidth := width - lipgloss.Width(mem) - 1
+	stacked := descWidth < listInnerWidth+panelChrome
+	if stacked {
+		descWidth = width
+	}
+	style := panelStyle.Width(descWidth - 2)
+
+	descRoom := rows
+	if !stacked {
+		descRoom = max(rows, lipgloss.Height(mem))
 	}
 
-	// The description runs the full width of whatever's above it, so the three
-	// panels read as one block rather than as a wide box under two narrow ones.
-	about := panelStyle.Width(min(lipgloss.Width(top), inner) - 2).Render(p.about())
+	notes := len(p.Selection().Notes)
+	desc := stretch(style, descRoom, p.about(notes))
+	for notes > 0 && lipgloss.Height(desc) > descRoom {
+		notes--
+		desc = stretch(style, descRoom, p.about(notes))
+	}
 
-	return strings.Join([]string{
-		"",
-		" " + titleStyle.Render("GoLlama") + " " +
-			subtitleStyle.Render("choose a model to start with"),
-		"",
-		indent(top, 1),
-		indent(about, 1),
-		"",
-		" " + p.footer(),
-		"",
-	}, "\n")
+	if stacked {
+		return lipgloss.JoinVertical(lipgloss.Left, desc, mem)
+	}
+	if lipgloss.Height(desc) > lipgloss.Height(mem) {
+		mem = memPanelStyle.Height(lipgloss.Height(desc) - 2).Render(p.memory())
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, desc, " ", mem)
 }
 
 // --- the list ----------------------------------------------------------------
 
-// list is the left panel: one row per model, with the two numbers that decide
-// between them — how many parameters, and how much disk that is.
-func (p *Picker) list() string {
+// fitColWidth fits the longest verdict — "recommended" — plus nothing extra;
+// the column is right-aligned against the panel's own border so it needs no
+// padding of its own.
+const fitColWidth = 11
+
+// listRowChrome is every cell a row spends on something other than the name:
+// the "▸ " cursor, the four right-hand columns, and the gap in front of each
+// one. The name column takes whatever width is left, which is what lets the
+// row spread across the full panel instead of stopping at a fixed column.
+//
+// Has to match row's format string exactly — one space before the first
+// column, two before the rest — or the row runs a cell past the panel it's
+// rendered inside.
+const listRowChrome = 2 /* prefix */ + 1 + 6 /* params */ + 2 + 8 /* size */ +
+	2 + 8 /* status */ + 2 + fitColWidth
+
+// list is the left panel: one row per model, with the numbers that decide
+// between them, plus a verdict on whether it'll fit on this machine.
+func (p *Picker) list(width int) string {
 	rows := []string{heading("models"), ""}
 
-	end := min(p.top+maxVisibleRows, len(p.models))
+	rec := p.recommended()
+	end := min(p.top+p.visibleRows(), len(p.models))
 	for i := p.top; i < end; i++ {
-		rows = append(rows, p.row(i))
+		rows = append(rows, p.row(i, width, i == rec))
 	}
 	if hidden := len(p.models) - end; hidden > 0 {
 		rows = append(rows, dimStyle.Render(fmt.Sprintf("  %d more below", hidden)))
@@ -197,9 +266,12 @@ func (p *Picker) list() string {
 	return strings.Join(rows, "\n")
 }
 
-// row renders one model. The columns are fixed width so the sizes line up into
-// something you can scan down, which is the only reason to show them at all.
-func (p *Picker) row(i int) string {
+// row renders one model, its name stretched to fill whatever room the fixed
+// columns leave so the row reaches the far edge of the panel whatever the
+// terminal width — the point of a table is that everything lines up, and a
+// column of numbers huddled against the left border while the rest of the box
+// sits empty doesn't read as one.
+func (p *Picker) row(i, width int, recommended bool) string {
 	m := p.models[i]
 
 	size := sysinfo.Bytes(m.Arch.DiskBytes())
@@ -210,11 +282,13 @@ func (p *Picker) row(i int) string {
 		size = "—"
 	}
 
-	text := fmt.Sprintf("%-17s %s  %s  %s",
-		trunc(m.Name, 17),
+	nameWidth := max(width-listRowChrome, 8)
+	text := fmt.Sprintf("%-*s %s  %s  %s  %s",
+		nameWidth, trunc(m.Name, nameWidth),
 		padLeft(params(m.Arch.Params()), 6),
 		padLeft(size, 8),
-		padLeft(status(m), 8))
+		padLeft(status(m), 8),
+		p.fit(m, recommended))
 
 	if i == p.cursor {
 		return selectedStyle.Render("▸ " + text)
@@ -232,6 +306,58 @@ func status(m Model) string {
 	default:
 		return "get it"
 	}
+}
+
+// recommended picks the biggest model that still fits this machine with room
+// to spare, so the list can point at the best one rather than just the safest
+// one. The demo model is never it — it always fits trivially, and pointing at
+// the random model as the recommendation defeats the point of the column.
+//
+// It returns -1 when nothing fits, or when the machine didn't report enough
+// memory to judge by.
+func (p *Picker) recommended() int {
+	if p.sys.Headroom() <= 0 {
+		return -1
+	}
+	best := -1
+	for i, m := range p.models {
+		if m.Demo || p.residentFrac(m) >= 0.5 {
+			continue
+		}
+		if best == -1 || m.Arch.Params() > p.models[best].Arch.Params() {
+			best = i
+		}
+	}
+	return best
+}
+
+// residentFrac is what running m would cost against what's free right now, the
+// same fraction the gauge colours by.
+func (p *Picker) residentFrac(m Model) float64 {
+	head := p.sys.Headroom()
+	if head <= 0 {
+		return 0
+	}
+	ctx := min(contextEstimate, m.Arch.Context)
+	resident := m.Arch.ResidentBytes() + m.Arch.KVBytes(ctx)
+	return float64(resident) / float64(head)
+}
+
+// fit is the verdict in the rightmost column: this repo's actual recommendation
+// for the biggest model worth running, or a plain fits/too large for everything
+// else. It's the same headroom arithmetic as the memory panel and the gauge,
+// collapsed to the one word this column has room for.
+func (p *Picker) fit(m Model, recommended bool) string {
+	if recommended {
+		return keyStyle.Bold(true).Render(padLeft("recommended", fitColWidth))
+	}
+	if p.sys.Headroom() <= 0 {
+		return dimStyle.Render(padLeft("—", fitColWidth))
+	}
+	if p.residentFrac(m) >= 1 {
+		return warnStyle.Render(padLeft("too large", fitColWidth))
+	}
+	return dimStyle.Render(padLeft("fits", fitColWidth))
 }
 
 // --- the memory column -------------------------------------------------------
@@ -346,14 +472,19 @@ func memValue(n int64) string {
 // about is the full-width panel under the list: prose for the highlighted
 // model, then the architecture it's prose about, then how to get it if it isn't
 // here yet.
-func (p *Picker) about() string {
+//
+// notes caps how many paragraphs of prose are included. The prose is the first
+// thing to give up on a terminal too short for all of this: the architecture
+// line and the download command are what you'd act on, the paragraphs are what
+// you'd read once.
+func (p *Picker) about(notes int) string {
 	m := p.Selection()
 	a := m.Arch
 
 	// The paragraphs go in unwrapped; the panel's Width does the wrapping, so
 	// the same prose reflows instead of going ragged on a narrow terminal.
 	rows := []string{heading(m.Name), ""}
-	for _, para := range m.Notes {
+	for _, para := range m.Notes[:min(notes, len(m.Notes))] {
 		rows = append(rows, dimStyle.Render(para), "")
 	}
 
@@ -378,17 +509,24 @@ func (p *Picker) about() string {
 	return strings.Join(rows, "\n")
 }
 
-func (p *Picker) footer() string {
-	if p.warn != "" {
-		return warnStyle.Render(p.warn)
-	}
+// bar is the toolbar along the bottom.
+//
+// A complaint about the row under the cursor goes on a second line inside it
+// rather than replacing the keys, which is what it used to do: the keys are the
+// frame, and a screen that answers a keystroke by taking the keys away is a
+// worse answer than one that explains itself underneath them.
+func (p *Picker) bar() string {
 	keys := []string{
 		keyStyle.Render("↑↓") + dimStyle.Render(" choose"),
 		keyStyle.Render("enter") + dimStyle.Render(" load it"),
 		keyStyle.Render("b") + dimStyle.Render(" back"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}
-	return strings.Join(keys, dimStyle.Render(" · "))
+	left := strings.Join(keys, dimStyle.Render(" · "))
+	if p.warn != "" {
+		left += "\n" + warnStyle.Render(p.warn)
+	}
+	return toolbar(p.w, left, "")
 }
 
 // trunc clips a name to fit its column, with an ellipsis so it's obvious that's
