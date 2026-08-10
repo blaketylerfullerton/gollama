@@ -30,7 +30,7 @@ You get a welcome screen first — the llama on the left, the machine you're abo
                     █ o  ████     │  chip       Apple M4                                  │
                     ▀██▄▄▄███     │  cores      10 cores (4P + 6E)                        │
                      █████▀       │  gpu        10-core GPU (unused)                      │
-                     █████        │  memory     16.0 GB                                   │
+                     █████        │  memory     16.0 GB · 8.4 GB free                     │
                     █████         │  platform   darwin/arm64                              │
           ▄▄▄▄▄▄▄▄▄█████          │  runtime    go1.25.0 · GOMAXPROCS 10                  │
    ▄▄███████████████████          │                                                       │
@@ -41,12 +41,42 @@ You get a welcome screen first — the llama on the left, the machine you're abo
       ██  ██      ██  ██          │                                                       │
       ▀▀  ▀▀      ▀▀  ▀▀          ╰───────────────────────────────────────────────────────╯
 
- enter run the model · q quit
+ ↑↓ choose · enter select · q quit
 ```
 
-Those two numbers are the ones that decide how this feels. Every matmul in `engine/model/` is scalar Go on the CPU, so the core count is the speed and the resident size is whether it fits at all — worth seeing before the first token rather than inferring it from a disappointing one. Hardware detection is in `tools/sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else.
+Hardware detection is in `tools/sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else. "select a model" leads to the picker; "what is GoLlama" leads to a short about page — both come back here rather than exiting through it.
 
-Press enter and the run itself is unchanged:
+The picker is where the memory arithmetic that actually matters happens: every model this repo knows about, what it costs on disk versus resident in RAM once bf16 is widened to float32, and a verdict — recommended, fits, or too large — against whatever this machine has free right now:
+
+```text
+  GoLlama  choose a model to start with                     Blake's MacBook Air · 16.0 GB ram · 8.4 GB free
+
+ ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
+ │  models                                                                                       │
+ │                                                                                                │
+ │  ▸ Qwen3-0.6B                                              596M    1.4 GB     ready  recommended │
+ │    Qwen3-1.7B                                              1.7B    3.8 GB    get it         fits │
+ │    Qwen3-4B                                                4.0B    8.2 GB    get it    too large │
+ │    tiny random model                                         1M         —  built in         fits │
+ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
+ ╭────────────────────────────────────────────────────────────╮ ╭────────────────────────────────╮
+ │  Qwen3-0.6B                                                 │ │  MEMORY AFTER LOAD             │
+ │  The one this repo is built around...                       │ │  recommendations assume you    │
+ │                                                              │ │  keep 4.2 GB free              │
+ │  28 layers · 16 q heads over 8 kv heads × 128 dims           │ │                                │
+ │  596M parameters · 151936 vocabulary · 40960 max context     │ │  resident         2.8 GB       │
+ ╰──────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
+```
+
+Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation `cmd/inspect` uses, read out as two short ranked lists next to a live conversation instead of full matrices.
+
+With a checkpoint in `checkpoints/qwen3-0.6b` this is the real 0.6B model; a fresh clone with nothing downloaded yet still has the built-in "tiny random model" entry, so every screen works before you fetch any weights. To get the real ones:
+
+```bash
+huggingface-cli download Qwen/Qwen3-0.6B --local-dir checkpoints/qwen3-0.6b
+```
+
+`-prompt` seeds the chat's first message. `-no-splash`, or piping stdout, skips all three screens and falls back to the old fixed walkthrough printed straight to the terminal — for scripting, or a terminal bubbletea can't draw on:
 
 ```text
 checkpoints/qwen3-0.6b
@@ -63,12 +93,6 @@ next token
 output  The capital of France is Paris, and
 
 prefill 2.587s · 3 tokens in 2.831s (944ms/token) · kv cache 224 KB/token
-```
-
-`-prompt` runs anything you like. With a checkpoint in `checkpoints/qwen3-0.6b` this is the real 0.6B model; without one it falls back to a tiny randomly initialized model, so a fresh clone still exercises every stage. To get the weights:
-
-```bash
-huggingface-cli download Qwen/Qwen3-0.6B --local-dir checkpoints/qwen3-0.6b
 ```
 
 ## The walkthrough
@@ -370,8 +394,13 @@ outside the standard library. `tools/` is everything that makes a run watchable
 transformer works, `engine/` is the whole thing and you can ignore the rest.
 
 ```text
-main.go              loads a checkpoint (or a random model) and walks a prompt
-                     through every stage, printing as it goes
+main.go              flag parsing, the printed walkthrough (-no-splash / piped),
+                     and setup() — loads a checkpoint, or falls back to a
+                     random model when one isn't there
+chat.go              the interactive path: wires the picker's choice into a
+                     live *model.GPT and turns typed lines into streamed tokens
+                     plus the per-token attention/candidate summaries the
+                     chat screen's inspect tab shows
 
 engine/
   tokenizer/         byte-level BPE, hand-written pretokenizer, tokenizer.json
@@ -397,7 +426,19 @@ tools/
   walkthrough/       the walkthrough Tracer, plus vector/matrix pretty-printers
   trace/             the trace format: events, JSONL writer, in-memory collector,
                      and the tee that fans events out to several consumers
-  tui/               welcome screen and model picker (bubbletea, lipgloss)
+  tui/               the three-screen flow (bubbletea, lipgloss)
+    flow.go          Start() — wires welcome → picker → about back into a loop
+    welcome.go       screen 1: this machine, and what's on disk to run on it
+    picker.go        screen 2: every known model, memory cost against this
+                     machine, and a fits/recommended/too-large verdict
+    catalog.go       the model list itself — names, architectures, what's
+                     installed under a checkpoint root
+    chat.go          screen 3: the conversation, plus the inspect tab
+    about.go         the "what is GoLlama" page
+    layout.go        the frame both screens share: header, toolbar, panels
+    llama.go         the animated ASCII llama
+    wordmark.go      the "GoLlama" title art
+    style.go         shared lipgloss styles and the amber color ramp
   sysinfo/           what hardware this is about to run on
 
 cmd/inspect/         interactive TUI: type a prompt, run it, inspect the trace
