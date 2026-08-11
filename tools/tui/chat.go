@@ -22,8 +22,13 @@ import (
 // is a label for the header and two channels: one it reads streamed text and
 // status off of, one it writes what you typed onto. Whoever calls NewChat owns
 // the engine and decides what "generate" means; this file only owns the frame
-// around it — including a second tab, since "what did the model attend to"
-// is a question about that same stream of tokens, not a different program.
+// around it.
+//
+// It has no live inspect view of its own anymore — "what did the model attend
+// to" is answered after the fact instead, by stepping through a saved
+// conversation on the past-conversations screen (see history.go). Every
+// ChatStep is still recorded onto its turn for exactly that; nothing here
+// renders one live.
 
 // ChatToken is a slice of generated text as it comes off the model — usually
 // one token, decoded. It's a string rather than an id: this package doesn't
@@ -40,11 +45,11 @@ type ChatCandidate struct {
 	Prob float64
 }
 
-// ChatStep describes one generated token for the inspect tab: what the model
-// attended to while producing it, and what it would have said next at that
-// point. It rides alongside the ChatToken for the same token rather than
-// replacing it — the chat tab and the inspect tab are two views of one stream,
-// not two separate ones.
+// ChatStep describes one generated token: what the model attended to while
+// producing it, and what it would have said next at that point. It rides
+// alongside the ChatToken for the same token rather than replacing it — the
+// chat screen doesn't render this live, but it's recorded onto the turn so
+// history.Save has it for the past-conversations screen's step-through.
 type ChatStep struct {
 	Token      string
 	Attention  []ChatCandidate // which earlier tokens this one leaned on
@@ -73,22 +78,6 @@ const (
 	chatGenerating                  // a turn is in flight; input is read-only
 )
 
-// chatTab is which half of the screen is showing: the conversation, or what
-// the last few tokens actually did inside the model.
-type chatTab int
-
-const (
-	tabConversation chatTab = iota
-	tabInspect
-)
-
-func (t chatTab) String() string {
-	if t == tabInspect {
-		return "inspect"
-	}
-	return "chat"
-}
-
 // chatTurn is one exchange: what you typed, and however much of the model's
 // reply has arrived so far. model grows in place while a turn is in flight,
 // which is what makes the screen a stream rather than a spinner.
@@ -104,11 +93,6 @@ type chatTurn struct {
 	elapsed time.Duration
 }
 
-// maxSteps bounds how many tokens' worth of inspect detail are kept. Every
-// entry holds a handful of ranked lists, and a long conversation shouldn't
-// mean an ever-growing one — only the tail of it is ever on screen anyway.
-const maxSteps = 64
-
 // Chat is the bubbletea model for the conversation screen.
 type Chat struct {
 	label string // what's loaded, for the header — a model name, or "loading…"
@@ -120,16 +104,14 @@ type Chat struct {
 	phase  chatPhase
 	status string
 	err    error
-	tab    chatTab
 
 	turns []chatTurn
-	steps []ChatStep
 
 	turnStarted  time.Time
 	turnTokens   int
 	lastTurnRate string // "12 tok in 4.1s (2.9 tok/s)", frozen once a turn ends
 
-	sessionID string    // names this conversation's file under history.Save
+	sessionID string // names this conversation's file under history.Save
 	startedAt time.Time
 
 	sys sysinfo.Info
@@ -236,15 +218,20 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, waitForChat(c.events)
 
 	case ChatStep:
-		c.steps = append(c.steps, msg)
-		if over := len(c.steps) - maxSteps; over > 0 {
-			c.steps = c.steps[over:]
+		// The chat screen itself has no inspect view anymore — this is kept
+		// only so history.Save has each turn's steps for the past-
+		// conversations screen to step through later.
+		if len(c.turns) > 0 {
+			last := &c.turns[len(c.turns)-1]
+			last.steps = append(last.steps, msg)
 		}
-		c.refresh()
 		return c, waitForChat(c.events)
 
 	case ChatDone:
 		c.phase, c.status = chatIdle, ""
+		if len(c.turns) > 0 {
+			c.turns[len(c.turns)-1].elapsed = time.Since(c.turnStarted)
+		}
 		c.lastTurnRate = c.turnRate()
 		c.input.Focus()
 		c.refresh()
@@ -278,10 +265,6 @@ func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		return c, tea.Quit
-	case "tab":
-		c.tab = (c.tab + 1) % 2
-		c.refresh()
-		return c, nil
 	case "enter":
 		return c, c.submit()
 	case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
@@ -289,11 +272,10 @@ func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		c.vp, cmd = c.vp.Update(msg)
 		return c, cmd
 	}
-	if c.phase == chatGenerating || c.tab == tabInspect {
-		// Mid-turn, the prompt that started it is already on screen and there's
-		// nothing a keystroke could do but corrupt the next submission. On the
-		// inspect tab there is no box to type into at all — every other key
-		// there is a scroll key, handled above.
+	if c.phase == chatGenerating {
+		// Mid-turn, the prompt that started it is already on screen and
+		// there's nothing a keystroke could do but corrupt the next
+		// submission.
 		return c, nil
 	}
 	var cmd tea.Cmd
@@ -327,18 +309,11 @@ func (c *Chat) refresh() {
 	c.vp.GotoBottom()
 }
 
-// setContent re-renders whichever tab is showing into the viewport without
-// touching scroll position — for updates like the RAM gauge ticking over that
-// change what's on screen but aren't new conversation to follow to the bottom
-// of.
+// setContent re-renders the transcript into the viewport without touching
+// scroll position — for updates like the RAM gauge ticking over that change
+// what's on screen but aren't new conversation to follow to the bottom of.
 func (c *Chat) setContent() {
-	var content string
-	if c.tab == tabInspect {
-		content = c.inspect()
-	} else {
-		content = c.transcript()
-	}
-	c.vp.SetContent(c.anchorBottom(content, c.vp.Height))
+	c.vp.SetContent(c.anchorBottom(c.transcript(), c.vp.Height))
 }
 
 // anchorBottom pads content with leading blank lines so short conversations
@@ -346,39 +321,11 @@ func (c *Chat) setContent() {
 // Code's transcript hugs the prompt instead of floating at the top of an
 // otherwise empty pane. Once content fills the panel this is a no-op — the
 // padding only ever fills the gap, never trims anything.
-//
-// When the gap is big enough to hold something, it holds the session stats
-// instead of going to waste — the same numbers the toolbar shows, just given
-// room to be read rather than squeezed onto one line.
 func (c *Chat) anchorBottom(content string, height int) string {
-	pad := height - lipgloss.Height(content)
-	if pad <= 0 {
-		return content
+	if pad := height - lipgloss.Height(content); pad > 0 {
+		return strings.Repeat("\n", pad) + content
 	}
-	stats := c.sessionStats()
-	if statH := lipgloss.Height(stats); pad >= statH+1 {
-		above := pad - statH
-		return strings.Repeat("\n", above/2) + stats + strings.Repeat("\n", pad-above/2-statH) + content
-	}
-	return strings.Repeat("\n", pad) + content
-}
-
-// sessionStats is the block shown in the empty space above a short
-// conversation: the same "is this still fine" numbers as the stats line, plus
-// a RAM gauge and the current stage, laid out with room to breathe since
-// there's nothing else competing for that space yet.
-func (c *Chat) sessionStats() string {
-	rows := []string{
-		heading("session"),
-		"",
-		c.ramGauge(),
-		row("resident", "~"+sysinfo.Bytes(c.arch.ResidentBytes())),
-		row("stage", c.stageLabel()),
-	}
-	if rate := c.tpsLabel(); rate != "" {
-		rows = append(rows, row("tok/s", rate))
-	}
-	return lipgloss.NewStyle().Align(lipgloss.Center).Render(strings.Join(rows, "\n"))
+	return content
 }
 
 // stageLabel names what the engine is doing right now, in the same words the
@@ -410,7 +357,8 @@ func (c *Chat) tpsLabel() string {
 
 // ramGauge is a compact bar of used-vs-total memory, the same colour-by-
 // fraction bar the picker draws before a model is even loaded — brighter as
-// it fills, no legend needed.
+// it fills, no legend needed. Narrower than the picker's own gauge: this one
+// sits in a small corner box rather than a panel with room to spare.
 func (c *Chat) ramGauge() string {
 	if c.sys.MemoryBytes == 0 {
 		return dimStyle.Render("ram unknown")
@@ -419,7 +367,7 @@ func (c *Chat) ramGauge() string {
 	frac := float64(used) / float64(c.sys.MemoryBytes)
 	style := lipgloss.NewStyle().Foreground(amber.Of(frac))
 
-	const width = 20
+	const width = 14
 	filled := min(int(frac*width+0.5), width)
 	bar := style.Render(strings.Repeat("█", filled)) +
 		amber.Fg(amber.Ash).Render(strings.Repeat("░", width-filled))
@@ -462,34 +410,48 @@ func (c *Chat) save() {
 	}
 	turns := make([]history.Entry, len(c.turns))
 	for i, t := range c.turns {
-		turns[i] = history.Entry{You: t.you, Model: t.model}
+		turns[i] = history.Entry{
+			You: t.you, Model: t.model,
+			Tokens: len(t.steps), Elapsed: t.elapsed,
+			Steps: historySteps(t.steps),
+		}
 	}
 	_ = history.Save(history.Conversation{
 		ID: c.sessionID, Label: c.label, StartedAt: c.startedAt, Turns: turns,
 	})
 }
 
-// inspect is the second tab: one block per recent token, each with the two
-// rankings that explain it — what it leaned on, and what it thought came next.
-// It's the same idea as cmd/inspect's logit lens and attention views, sized
-// down to fit beside a conversation instead of a whole screen.
-func (c *Chat) inspect() string {
-	if len(c.steps) == 0 {
-		return dimStyle.Render("Nothing generated yet — send something on the chat tab, then come back " +
-			"here to see what each token attended to and what it ranked as likely to follow.")
+// historySteps converts the inspect data captured during a turn into the
+// shape history.Save writes to disk, so a rewatch later has the same
+// attention and ranking lists the live inspect tab did.
+func historySteps(steps []ChatStep) []history.Step {
+	out := make([]history.Step, len(steps))
+	for i, s := range steps {
+		out[i] = history.Step{
+			Token:      s.Token,
+			Attention:  historyCandidates(s.Attention),
+			Candidates: historyCandidates(s.Candidates),
+		}
 	}
-	blocks := make([]string, len(c.steps))
-	for i, s := range c.steps {
-		blocks[i] = keyStyle.Render(fmt.Sprintf("%q", s.Token)) + "\n" +
-			"  " + dimStyle.Render("attended to  ") + candidateList(s.Attention) + "\n" +
-			"  " + dimStyle.Render("ranked next  ") + candidateList(s.Candidates)
+	return out
+}
+
+func historyCandidates(cs []ChatCandidate) []history.Candidate {
+	if len(cs) == 0 {
+		return nil
 	}
-	return strings.Join(blocks, "\n\n")
+	out := make([]history.Candidate, len(cs))
+	for i, c := range cs {
+		out[i] = history.Candidate{Text: c.Text, Prob: c.Prob}
+	}
+	return out
 }
 
 // candidateList renders a ranked list as "text 42% · text 18% · …", the same
 // compact form the picker uses for its own verdicts — a row you can scan
-// without the columns of a table.
+// without the columns of a table. The chat screen no longer has a live view
+// of its own that uses this — see history.go's step-through, which is the
+// only caller left.
 func candidateList(cs []ChatCandidate) string {
 	if len(cs) == 0 {
 		return dimStyle.Render("—")
@@ -509,9 +471,11 @@ func candidateList(cs []ChatCandidate) string {
 func (c *Chat) layout() {
 	bar := c.bar()
 	inner := max(c.w-2*screenMargin, minSpecsWidth)
-	// Title, blank line, tab strip, blank line, and the stats line above the
-	// toolbar all come out of the body before the panel gets what's left.
-	rows := bodyRows(c.h, bar) - 4
+	// The info box's own height varies (an error adds a line, a finished turn
+	// adds a tok/s row), so it's measured rather than assumed the way a
+	// single title line used to be.
+	infoHeight := lipgloss.Height(c.infoBox(inner))
+	rows := bodyRows(c.h, bar) - infoHeight - 1 // info box, then a blank line before the panel
 
 	c.input.Width = max(inner-4-lipgloss.Width(c.input.Prompt), 8)
 	// The panel renders at panelStyle.Width(inner-2), and that call's own
@@ -519,7 +483,7 @@ func (c *Chat) layout() {
 	// so the text column inside the border and padding is inner-2-4. See
 	// picker.go's list/mem panels for the same arithmetic.
 	c.vp.Width = inner - 6
-	c.vp.Height = max(rows-4, 3)
+	c.vp.Height = max(rows-2, 3) // less the blank line and input box below the panel
 	c.refresh()
 }
 
@@ -529,82 +493,44 @@ func (c *Chat) View() string {
 
 	panel := panelStyle.Width(inner - 2).Height(c.vp.Height).Render(c.vp.View())
 
-	rows := []string{header("GoLlama", c.headerSubtitle(), inner), "", c.tabs(inner), "", panel}
-	if c.tab == tabConversation {
-		rows = append(rows, "", c.input.View())
+	rows := []string{
+		c.infoBox(inner), "",
+		panel, "",
+		c.input.View(),
 	}
-	rows = append(rows, "", c.stats(inner))
 
 	return screen(c.w, c.h, lipgloss.JoinVertical(lipgloss.Left, rows...), bar)
 }
 
-// tabs is the nav strip: which of the two views is showing, and the key that
-// switches. It sits under the title rather than in the toolbar because it's a
-// choice about the panel below it, not a global command like quitting.
-func (c *Chat) tabs(width int) string {
-	var cells []string
-	for _, t := range []chatTab{tabConversation, tabInspect} {
-		label := " " + t.String() + " "
-		if t == c.tab {
-			cells = append(cells, selectedStyle.Render(label))
-		} else {
-			cells = append(cells, dimStyle.Render(label))
-		}
-	}
-	strip := strings.Join(cells, dimStyle.Render("│"))
-	return strip + dimStyle.Render("   tab to switch")
-}
+// infoBoxWidth is the outer width of the corner box — wide enough for its
+// widest line, the RAM gauge plus its free/total readout, without stretching
+// across the terminal the way a full-width header used to. See style.go's
+// panelChrome: the usable text column inside is this minus 6 (padding plus
+// border).
+const infoBoxWidth = 60
 
-func (c *Chat) headerSubtitle() string {
-	if c.err != nil {
-		return warnStyle.Render(c.err.Error())
-	}
-	return "chatting with " + c.label
-}
-
-// stats is the line above the toolbar: what this conversation is costing, in
-// the same units the picker used to decide whether to load the model at all.
-// It's memory rather than the toolbar's keys because it isn't a command — it's
-// the answer to "is this still fine", which is worth being able to glance at
-// without pressing anything.
+// infoBox is what used to be spread across a header line and a stats line
+// above the toolbar, now one box in the top-left corner: what's loaded, what
+// it's doing, and what it's costing, the same shape the welcome screen's
+// "This machine" panel uses for the same kind of glance-and-move-on numbers.
 //
-// Parts drop from the end, least essential first, until what's left fits
-// width — the same accommodation the toolbar makes for its own right half. A
-// line that wrapped would drag every shorter line above it out to match, since
-// lipgloss.JoinVertical pads a block to its widest member.
-func (c *Chat) stats(width int) string {
-	parts := []string{
-		"ram " + memPhrase(c.sys),
-		"resident ~" + sysinfo.Bytes(c.arch.ResidentBytes()),
+// available is the full width the screen has to work with; the box only
+// takes infoBoxWidth of it unless the terminal itself is narrower, so it
+// reads as a corner box rather than another full-width header.
+func (c *Chat) infoBox(available int) string {
+	rows := []string{
+		heading(c.label),
+		row("stage", c.stageLabel()),
+		labelStyle.Render("ram") + c.ramGauge(),
+		row("resident", "~"+sysinfo.Bytes(c.arch.ResidentBytes())),
 	}
-	if c.lastTurnRate != "" {
-		parts = append(parts, c.lastTurnRate)
-	} else if c.phase == chatGenerating && c.turnTokens > 0 {
-		parts = append(parts, fmt.Sprintf("%d tok so far", c.turnTokens))
+	if rate := c.tpsLabel(); rate != "" {
+		rows = append(rows, row("tok/s", rate))
 	}
-	for len(parts) > 1 && lipgloss.Width(strings.Join(parts, "   ·   ")) > width {
-		parts = parts[:len(parts)-1]
+	if c.err != nil {
+		rows = append(rows, "", warnStyle.Render(c.err.Error()))
 	}
-	line := strings.Join(parts, "   ·   ")
-	if lipgloss.Width(line) > width {
-		line = truncateCells(line, width)
-	}
-	return dimStyle.Render(line)
-}
-
-// truncateCells clips s to n terminal cells, measuring in display width rather
-// than bytes — a byte-index slice cuts multi-byte runes like "…" or an em dash
-// in half, which renders as a replacement glyph rather than a clean edge.
-func truncateCells(s string, n int) string {
-	var width int
-	for i, r := range s {
-		w := lipgloss.Width(string(r))
-		if width+w > n {
-			return s[:i]
-		}
-		width += w
-	}
-	return s
+	return panelStyle.Width(min(infoBoxWidth, available)).Render(strings.Join(rows, "\n"))
 }
 
 // memPhrase is "6.4GB free of 16.0GB", or "unknown" on a platform sysinfo
@@ -621,7 +547,6 @@ func memPhrase(s sysinfo.Info) string {
 func (c *Chat) bar() string {
 	keys := []string{
 		keyStyle.Render("enter") + dimStyle.Render(" send"),
-		keyStyle.Render("tab") + dimStyle.Render(" inspect"),
 		keyStyle.Render("↑↓") + dimStyle.Render(" scroll"),
 		keyStyle.Render("esc") + dimStyle.Render(" quit"),
 	}

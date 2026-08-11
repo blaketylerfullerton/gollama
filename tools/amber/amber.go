@@ -43,16 +43,16 @@ import (
 // it; Ramp[9] is a cream rather than white, so peak activation still belongs to
 // the same family as everything below it.
 var Ramp = [10]lipgloss.Color{
-	"#291A00", // 0  nothing here
-	"#472D00", // 1
-	"#704700", // 2
-	"#996100", // 3
-	"#CC8200", // 4
-	"#FFA200", // 5  the hue, undiluted
-	"#FFB83D", // 6
-	"#FFCF7A", // 7
-	"#FFE5B8", // 8
-	"#FFF6E6", // 9  as loud as it gets
+	"#151B29", // 0  nothing here
+	"#1F2C47", // 1
+	"#2C4270", // 2
+	"#385899", // 3
+	"#4472CC", // 4
+	"#4F8CFF", // 5  the hue, undiluted
+	"#7CA6FF", // 6
+	"#A6C2FF", // 7
+	"#CFDEFF", // 8
+	"#EFF4FF", // 9  as loud as it gets
 }
 
 // Named steps, for the places that pick a level rather than compute one.

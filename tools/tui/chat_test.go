@@ -151,10 +151,12 @@ func TestChatFitsTheTerminal(t *testing.T) {
 	}
 }
 
-// tab has to actually switch what the viewport is showing, and a ChatStep has
-// to survive the round trip onto that screen — otherwise the inspect tab is
-// just an empty box with a label on it.
-func TestChatTabShowsSteps(t *testing.T) {
+// The chat screen has no live inspect view of its own — a ChatStep's
+// attention and ranking lists should never show up in what's on screen, even
+// though the step itself still has to survive onto the turn (see
+// TestChatStepsRecordedForHistory) for the past-conversations screen to step
+// through later.
+func TestChatStepsNotShownLive(t *testing.T) {
 	c, _, _ := newTestChat(t, "hello")
 	c.Update(ChatStatus(""))
 	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -164,32 +166,30 @@ func TestChatTabShowsSteps(t *testing.T) {
 		Candidates: []ChatCandidate{{Text: ".", Prob: 0.4}},
 	})
 
-	if strings.Contains(c.View(), "Paris") {
-		t.Error("inspect content leaked into the chat tab's view")
-	}
-
-	c.Update(tea.KeyMsg{Type: tea.KeyTab})
-	if c.tab != tabInspect {
-		t.Fatalf("tab = %v after pressing tab, want inspect", c.tab)
-	}
-	view := c.View()
-	for _, want := range []string{"Paris", "capital", "60%", "."} {
-		if !strings.Contains(view, want) {
-			t.Errorf("inspect view is missing %q", want)
-		}
+	if strings.Contains(c.View(), "capital") || strings.Contains(c.View(), "60%") {
+		t.Error("inspect content (attention/candidates) leaked into the chat screen's view")
 	}
 }
 
-// The input is the chat tab's whole reason for existing; on the inspect tab
-// there's nothing to type into, so a stray keystroke there must not silently
-// land in a text box the reader can no longer see.
-func TestChatInputIsInertOnInspectTab(t *testing.T) {
-	c, _, _ := newTestChat(t, "")
+// A ChatStep is recorded onto the turn currently in flight so it can be
+// written to history — even though nothing on the chat screen itself renders
+// it live anymore.
+func TestChatStepsRecordedForHistory(t *testing.T) {
+	c, _, _ := newTestChat(t, "hello")
 	c.Update(ChatStatus(""))
-	c.Update(tea.KeyMsg{Type: tea.KeyTab})
-	c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
-	if c.input.Value() != "" {
-		t.Errorf("input.Value() = %q, want empty — keys on the inspect tab must not reach it", c.input.Value())
+	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	step := ChatStep{
+		Token:      "Paris",
+		Attention:  []ChatCandidate{{Text: "capital", Prob: 0.6}},
+		Candidates: []ChatCandidate{{Text: ".", Prob: 0.4}},
+	}
+	c.Update(step)
+
+	if len(c.turns) == 0 || len(c.turns[len(c.turns)-1].steps) != 1 {
+		t.Fatalf("turn.steps = %v, want the one ChatStep just sent", c.turns)
+	}
+	if got := c.turns[len(c.turns)-1].steps[0]; got.Token != step.Token {
+		t.Errorf("turn.steps[0].Token = %q, want %q", got.Token, step.Token)
 	}
 }
 

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/viewport"
@@ -20,7 +21,19 @@ var aboutNotes = []string{
 	"Inference only, no training. Every matmul is plain scalar Go, which is slow on purpose — hundreds of milliseconds a token rather than microseconds — so a token landing is something you can watch happen rather than a number that appears.",
 	"The point isn't speed, it's that every stage is inspectable. -v narrates a forward pass step by step: shapes, per-layer magnitudes, rotary tables, attention weights. The logit lens projects the residual stream through the output head at every layer, so you can watch an answer get found — early layers guess generic words, and the real answer usually only takes the lead a handful of layers before the end.",
 	"go run ./cmd/inspect opens an interactive trace viewer: type a prompt, run it, then step between generated tokens to see what each one attended to and where its answer settled. The chat screen after picking a model here does a live version of the same thing — press tab there to inspect what a streamed token leaned on and what it ranked as likely to come next.",
+	"Underneath both viewers is one recorder — tools/trace — that turns a forward pass into a file instead of driving a UI directly, so the engine never learns an inspector exists. It's JSON Lines: one header, then one line per event, of five kinds:",
 	"Grouped-query attention, rotary position embeddings, QK-norm, SwiGLU, RMSNorm, tied embeddings — Qwen3's architecture, matching Llama everywhere it can and diverging where it has to. None of it is optimized; all of it is meant to be legible.",
+}
+
+// traceEventDocs is what tools/trace's five Kind values actually record — kept
+// as its own boxed panel rather than folded into the prose above it, since a
+// reference list reads better set apart than run into a paragraph around it.
+var traceEventDocs = []struct{ kind, desc string }{
+	{"stage", "the residual stream's shape and magnitude at each point it's touched"},
+	{"attention", "one head's causal weights over every earlier token"},
+	{"rotary", "a head's query vector either side of the rotation, and how much it moved"},
+	{"logit_lens", "what the whole model would have guessed if it stopped at that layer"},
+	{"note", "commentary that isn't a tensor"},
 }
 
 // About is the bubbletea model for the "what is GoLlama" page.
@@ -101,11 +114,47 @@ func (a *About) layout() {
 func (a *About) body() string {
 	width := max(a.vp.Width, 20)
 	wrap := lipgloss.NewStyle().Width(width)
-	paras := make([]string, len(aboutNotes))
+
+	// traceEventsIndex is which paragraph in aboutNotes introduces the
+	// tracer — the box of event kinds goes right after it, not tied to any
+	// other position in the prose.
+	const traceEventsIndex = 4
+
+	var blocks []string
 	for i, p := range aboutNotes {
-		paras[i] = dimStyle.Render(wrap.Render(p))
+		blocks = append(blocks, dimStyle.Render(wrap.Render(p)))
+		if i == traceEventsIndex {
+			blocks = append(blocks, a.traceEventsBox(width))
+		}
 	}
-	return strings.Join(paras, "\n\n")
+	return strings.Join(blocks, "\n\n")
+}
+
+// traceEventsBox renders traceEventDocs as its own bordered panel — a
+// reference list, set apart from the surrounding prose the same way the
+// welcome screen sets "This machine" apart from its own menu.
+func (a *About) traceEventsBox(width int) string {
+	nameWidth := 0
+	for _, e := range traceEventDocs {
+		nameWidth = max(nameWidth, len(e.kind))
+	}
+	// Border (2) and padding (4) come out of width on top of what's given,
+	// same arithmetic as every other panel in this package — see layout()'s
+	// own comment on the panel wrapping this box.
+	descWidth := max(width-2-4-nameWidth-2, 10)
+	wrap := lipgloss.NewStyle().Width(descWidth)
+
+	rows := []string{heading("What the tracer records"), ""}
+	for _, e := range traceEventDocs {
+		name := keyStyle.Render(fmt.Sprintf("%-*s", nameWidth, e.kind))
+		lines := strings.Split(wrap.Render(e.desc), "\n")
+		row := name + "  " + dimStyle.Render(lines[0])
+		for _, l := range lines[1:] {
+			row += "\n" + strings.Repeat(" ", nameWidth+2) + dimStyle.Render(l)
+		}
+		rows = append(rows, row)
+	}
+	return panelStyle.Width(width - 2).Render(strings.Join(rows, "\n"))
 }
 
 func (a *About) View() string {
