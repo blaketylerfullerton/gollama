@@ -21,18 +21,29 @@ func NewRMSNorm(dim int, eps float64) RMSNorm {
 	return RMSNorm{Weight: w, Eps: eps}
 }
 
-// ForwardVec normalizes a single vector. Used directly for QK-norm, where the
-// norm applies per attention head over HeadDim rather than over the whole row.
-func (n *RMSNorm) ForwardVec(x []float32) []float32 {
+// Scale is the factor ForwardVec divides x by, ahead of the learned weight:
+// 1/rms(x). It depends on the whole vector, which is the only nonlinear thing
+// this norm does.
+//
+// Attribution needs it separately because holding it fixed at what the finished
+// residual stream produced makes the norm linear in its input, and a sum of
+// contributions then maps to a sum of logits. Everything else calls ForwardVec.
+func (n *RMSNorm) Scale(x []float32) float64 {
 	var sumSq float64
 	for _, v := range x {
 		sumSq += float64(v) * float64(v)
 	}
-	rms := math.Sqrt(sumSq/float64(len(x)) + n.Eps)
+	return 1 / math.Sqrt(sumSq/float64(len(x))+n.Eps)
+}
+
+// ForwardVec normalizes a single vector. Used directly for QK-norm, where the
+// norm applies per attention head over HeadDim rather than over the whole row.
+func (n *RMSNorm) ForwardVec(x []float32) []float32 {
+	scale := n.Scale(x)
 
 	out := make([]float32, len(x))
 	for i, v := range x {
-		out[i] = float32(float64(v) / rms * float64(n.Weight[i]))
+		out[i] = float32(float64(v) * scale * float64(n.Weight[i]))
 	}
 	return out
 }

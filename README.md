@@ -153,20 +153,45 @@ Both render identical data, because both go through `tools/trace/`: the live col
 The **logit lens** is the reason this exists. It projects the residual stream through the LM head at *every* layer, so you can watch an answer get found:
 
 ```text
-  layer   prediction          prob
-  0       " only"            18.1%  ██████░░░░░░░░░░░░░░░░░░░░░░░░
-  4       " not"             54.6%  ██████████████████░░░░░░░░░░░░
-  7       " a"               54.8%  ██████████████████░░░░░░░░░░░░
-  12      " a"               20.7%  ███████░░░░░░░░░░░░░░░░░░░░░░░
-  17      "____"             76.6%  ██████████████████████████░░░░
-  21      "____"             45.1%  ███████████████░░░░░░░░░░░░░░░
-  22      " Paris"           55.1%  ██████████████████░░░░░░░░░░░░   ← first leads here
-  25      " Paris"           96.4%  ████████████████████████████████
-  27      " Paris"           65.7%  ██████████████████████░░░░░░░░
-  out     " Paris"           65.7%  ██████████████████████░░░░░░░░
+  layer   prediction          prob     rank      H
+  0       " only"            18.1%   #11876   3.43  ██████░░░░░░░░░░░░░░░░░░
+  4       " not"             54.6%   #12549   2.37  █████████████░░░░░░░░░░░
+  7       " a"               54.8%    #3056   2.15  █████████████░░░░░░░░░░░
+  12      " a"               20.7%   #10541   3.56  ████░░░░░░░░░░░░░░░░░░░░
+  17      "____"             76.6%    #3597   1.05  ██████████████████░░░░░░
+  20      "____"             55.9%      #43   1.26  █████████████░░░░░░░░░░░
+  21      "____"             45.1%       #9   1.92  ██████████░░░░░░░░░░░░░░
+  22      " Paris"           55.1%       #1   1.87  █████████████░░░░░░░░░░░   ← first leads here
+  25      " Paris"           96.4%       #1   0.31  ███████████████████████░
+  27      " Paris"           65.7%       #1   2.31  ███████████████░░░░░░░░░
+  out     " Paris"           65.7%       #1   2.31  ███████████████░░░░░░░░░
 ```
 
 Early layers guess generic function words. By layer 7 it knows a noun phrase is coming (`" a"`). Around 17 it's reaching for a blank (`"____"`). **" Paris" only takes the lead at layer 22 of 28**, then sharpens to 96% before the last layer hedges back down.
+
+The two extra columns are there because the top row can't tell you the whole story. `rank` is where the eventual answer stood at that depth: it sits past ten thousand for two thirds of the stack, then goes **#43 → #9 → #1** over three layers. Reading the prediction column alone, " Paris" appears from nowhere at 22; reading the rank, it was climbing hard from 19 onwards, and 22 is where a move already underway crosses the line. `H` is the entropy of the whole distribution in nats, which is the model's confidence *independent of which token is winning* — layer 17 is 76.6% sure of `"____"` at H 1.05, and the last layer drops to H 2.31 while still leading with " Paris". That final hedge is a widening of the whole distribution, not a change of mind.
+
+**Direct logit attribution** answers the question none of the above can: not what the model thought at each depth, but which parts of it are *why*. Every component — each attention head, each MLP, the embedding — adds its own vector into the residual stream, and with the final norm's scaling held at what the finished stream produced, the rest is linear. So an output logit is exactly the sum of the components' individual pushes on it, and each push can be reported separately:
+
+```text
+  layer 26   pushing " Paris"
+
+  component     Δlogit   ‖write‖
+  head 0        +3.700    43.737              │████████████
+  head 1        -1.781    32.796        ██████│
+  head 7        -0.629    13.032            ██│
+  head 9        -0.144    39.767              │
+  …
+  mlp           +0.335   114.404              │█
+
+  largest across the whole pass: L26 head 0 +3.70, L24 mlp +3.58, L22 mlp +2.90, L23 mlp +2.46
+```
+
+`‖write‖` is how much the component moved the residual stream at all; `Δlogit` is how much of that landed on the answer. They come apart constantly, and that gap is the whole point. Head 9 makes the second-largest write in the layer and contributes **nothing** to " Paris" — whatever it's doing, the answer doesn't depend on it. The MLP writes nearly three times as hard as any head and still only adds +0.34. Head 0, writing less than head 9, supplies +3.70 on its own, and head 1 spends most of a comparable write pushing the answer *down*.
+
+An attention pattern tells you a head looked somewhere. Only this tells you the output depended on it — which is why the two views are worth reading side by side: a striking pattern attached to no push is easy to over-read on its own.
+
+Across the whole pass, three of the five largest contributions are MLPs in layers 22–24 — exactly the stretch where the rank column shows " Paris" climbing from #43 to #1. The heads move the stream harder; the MLPs are where the movement becomes the answer.
 
 The attention view shows the sink getting dramatic with depth — at layer 27, token 0 absorbs 94% of every later position's attention:
 
@@ -181,7 +206,7 @@ The attention view shows the sink getting dramatic with depth — at layer 27, t
   token 0 absorbs 94% of later positions' attention on average
 ```
 
-Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `g`/`G` first/last layer, `q` quit.
+Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `1`–`4` jump to a view, `g`/`G` first/last layer, `q` quit.
 
 Stepping between tokens is where it gets interesting. On `"The capital of France is"` the answer lands at layer 22. On the *next* token — after "…is Paris." — the model predicts `" The"`, and that one settles by layer 19. Different tokens are decided at different depths.
 
@@ -211,16 +236,36 @@ Set `gpt.Trace` and you get the walkthrough. Leave it nil — which is what test
 
 **The contract is that implementations must not retain slices past the call.** The engine is free to hand over scratch buffers it means to reuse, so anything you want to keep has to be copied. That's deliberate: buffer reuse is the largest allocation win left in the forward pass, and putting the copy on the tracer costs nothing when tracing is off. Implementations also don't need to be goroutine-safe — every call comes from the goroutine running the pass, and if the matmuls are ever parallelized, emissions will stay on the serial path.
 
-The logit lens is an opt-in extension, because it isn't free — one extra LM head projection per layer:
+Two extensions hang off it, both opt-in by type assertion, because neither is free. The logit lens costs one extra LM head projection per layer:
 
 ```go
 type LogitLensTracer interface {
 	Tracer
-	LogitLens(layer int, logits []float32)
+	LogitLens(layer int, logits []float32, target int)
 }
 ```
 
-The engine type-asserts for it, so a tracer that doesn't want intermediate predictions simply doesn't implement the method and never pays for them.
+`target` is the token the pass ended up predicting, which is what makes the rank column possible. It also forces an ordering: the target isn't known until the stack finishes, so the readouts are emitted afterwards in layer order rather than interleaved with the blocks that produced them. Same cost, strictly more information.
+
+Attribution costs one extra `Wo`-sized matmul per layer, to split each head's output back out before `Wo` sums them:
+
+```go
+type AttributionTracer interface {
+	Tracer
+	AttributionTopK() int
+	Attribution(layer, component int, tokens []int, effects []float32, norm float64)
+}
+```
+
+`AttributionTopK` is a second gate on top of the type assertion, so a tracer that only sometimes wants attribution doesn't have to change its type to say so — returning zero turns the whole path off, recording included. The chat UI leaves it off; `-trace` and `cmd/inspect` turn it on.
+
+Effects are reported against the pass's own top candidates rather than the whole vocabulary. Attributing every token would mean a full LM head projection per component — sixteen extra forward passes per layer — and the question worth asking is which components pushed the tokens that were actually in contention. Folding the final norm into the unembedding directions once, instead of into every component, keeps the whole thing to a few hundred thousand multiply-adds against a 155M-parameter LM head.
+
+The engine type-asserts for both, so a tracer that wants neither simply doesn't implement the methods and never pays for them. `trace.Tee` has to be careful here: it advertises an extension only when one of its children would actually use it, which is why there's a type per combination rather than one that implements everything.
+
+**Why the sum is exact, and where the approximation is.** Everything after the last block is a norm and a linear map. RMSNorm's only nonlinearity is the scaling factor it computes from the whole vector — hold that at the value the *finished* stream produced and the norm becomes linear, so the output logit for a token is exactly the sum of the components' effects on it. `RMSNorm.Scale` exists to expose that factor for this. `TestAttributionSumsToTheLogit` checks the identity on both forward paths, and `TestAttributionSumsToTheLogitOnRealWeights` checks it survives the real model, where the stream reaches magnitudes in the hundreds and cancellation has room to bite.
+
+What this measures is the *direct* path: what a component contributed by writing into the stream that reaches the LM head. A layer-2 head that matters only because layer-20 read what it wrote shows up under layer 20, not layer 2. That's the standard meaning of direct logit attribution, and it's a real limitation rather than a rounding error — reading it as "total influence" is the one way to get badly wrong conclusions from a number that always adds up.
 
 ### How the pieces are separated
 

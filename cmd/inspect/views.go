@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -53,7 +55,8 @@ func (a *app) lensView() string {
 
 	var b strings.Builder
 	b.WriteString(headerRowStyle.Render(
-		fmt.Sprintf("  %-7s %-16s %7s  %s", "layer", "prediction", "prob", "")) + "\n")
+		fmt.Sprintf("  %-5s %-14s %7s %6s %6s  %s",
+			"layer", "prediction", "prob", "rank", "H", "")) + "\n")
 
 	// Find where the final answer first takes the lead, to mark it.
 	firstWin := -1
@@ -78,8 +81,21 @@ func (a *app) lensView() string {
 			label = "out" // the model's real output, not an intermediate read
 		}
 
-		row := fmt.Sprintf("  %-7s %-16s %6.1f%%  %s",
-			label, truncate(fmt.Sprintf("%q", top.Text), 16), top.Prob*100, bar(top.Prob, 34))
+		// Where the answer stands at this depth, and how undecided the model is
+		// overall. The two disagree often enough to be worth showing together: a
+		// layer can have the right token in front and still be near-uniform
+		// behind it, which reads as confidence from the top row alone.
+		rank, ent := "—", "—"
+		if e.TargetRank > 0 {
+			rank = fmt.Sprintf("#%d", e.TargetRank)
+		}
+		if e.Entropy > 0 {
+			ent = fmt.Sprintf("%.2f", e.Entropy)
+		}
+
+		row := fmt.Sprintf("  %-5s %-14s %6.1f%% %6s %6s  %s",
+			label, truncate(fmt.Sprintf("%q", top.Text), 14), top.Prob*100,
+			rank, ent, bar(top.Prob, 24))
 
 		switch {
 		case e.Layer == a.layer:
@@ -177,6 +193,149 @@ func (a *app) attentionView() string {
 // shape falls out of it at a glance.
 func heat(w float32) lipgloss.Style {
 	return lipgloss.NewStyle().Foreground(amber.Of(float64(w)))
+}
+
+// --- attribution --------------------------------------------------------------
+
+// attributionView answers the question the attention grid can't: not what a head
+// looked at, but whether it is why the answer came out the way it did. Each row
+// is one component's push on the final token's logit, positive to the right.
+//
+// The two views are worth reading together — a head with a striking pattern and
+// no push is doing something the output doesn't depend on, and that combination
+// is common enough that the pattern alone is easy to over-read.
+func (a *app) attributionView() string {
+	s := a.active()
+	if s == nil {
+		return ""
+	}
+	events := s.tr.Attributions(a.layer)
+	if len(events) == 0 {
+		return dimStyle.Render(
+			"  No attribution in this trace.\n" +
+				"  It's opt-in — trace.Opts{Attribution: true} — since it costs an extra\n" +
+				"  projection per layer and an event per component.")
+	}
+
+	target, label := a.attributionTarget(s)
+	if target < 0 {
+		return dimStyle.Render("  Nothing to attribute against: this trace has no prediction.")
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("  layer %s   pushing %s\n\n",
+		keyStyle.Render(fmt.Sprint(a.layer)),
+		hotStyle.Render(truncate(fmt.Sprintf("%q", label), 16))))
+
+	// Bars are scaled within the layer, so a layer that barely moves anything
+	// doesn't render as flat — the shape across its components is still the
+	// thing worth seeing. The numbers carry the absolute size.
+	var scale float64
+	for _, e := range events {
+		if v, ok := e.EffectOn(target); ok {
+			scale = math.Max(scale, math.Abs(float64(v)))
+		}
+	}
+
+	b.WriteString(headerRowStyle.Render(
+		fmt.Sprintf("  %-10s %9s %9s  %s", "component", "Δlogit", "‖write‖", "")) + "\n")
+
+	for _, e := range events {
+		v, ok := e.EffectOn(target)
+		if !ok {
+			continue
+		}
+		row := fmt.Sprintf("  %-10s %+9.3f %9.3f  %s",
+			componentName(e), v, e.Norm, signedBar(float64(v), scale, 12))
+		if e.Component == trace.ComponentHead && e.Head == a.head {
+			b.WriteString(selStyle.Render(row))
+		} else {
+			b.WriteString(row)
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n" + dimStyle.Render(
+		"  every component's push, over every layer, sums to the output logit"))
+	if top := a.topContributors(s, target, 4); len(top) > 0 {
+		b.WriteString("\n" + dimStyle.Render("  largest across the whole pass: "+strings.Join(top, ", ")))
+	}
+	return b.String()
+}
+
+// attributionTarget is the token being attributed: whatever the pass finally
+// predicted.
+func (a *app) attributionTarget(s *step) (int, string) {
+	if final := a.finalPrediction(); final != nil {
+		return final.ID, final.Text
+	}
+	for _, e := range s.lens {
+		if e.TargetRank > 0 {
+			return e.TargetID, e.TargetText
+		}
+	}
+	return -1, ""
+}
+
+// topContributors ranks every component in the run by how hard it pushed the
+// target, so a layer-by-layer view has somewhere to start.
+func (a *app) topContributors(s *step, target, n int) []string {
+	type hit struct {
+		label string
+		v     float32
+	}
+	var hits []hit
+	for _, e := range s.tr.Kind(trace.KindAttribution) {
+		if v, ok := e.EffectOn(target); ok {
+			hits = append(hits, hit{fmt.Sprintf("L%d %s", e.Layer, componentName(e)), v})
+		}
+	}
+	sort.Slice(hits, func(i, j int) bool {
+		return math.Abs(float64(hits[i].v)) > math.Abs(float64(hits[j].v))
+	})
+	if len(hits) > n {
+		hits = hits[:n]
+	}
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = fmt.Sprintf("%s %+.2f", h.label, h.v)
+	}
+	return out
+}
+
+func componentName(e trace.Event) string {
+	switch e.Component {
+	case trace.ComponentHead:
+		return fmt.Sprintf("head %d", e.Head)
+	case trace.ComponentEmbed:
+		return "embedding"
+	default:
+		return string(e.Component)
+	}
+}
+
+// signedBar draws a magnitude either side of a centre rule, so the sign is
+// visible as direction before any number is read. Negative is drawn in the alert
+// colour rather than on the magnitude ramp: a large push down and a large push
+// up are equally strong readings, and putting both on brightness alone would
+// make them indistinguishable at a glance.
+func signedBar(v, scale float64, half int) string {
+	if scale <= 0 {
+		scale = 1
+	}
+	frac := math.Abs(v) / scale
+	n := min(half, int(frac*float64(half)+0.5))
+	rule := amber.NFg(amber.Rule).Render("│")
+	gap := strings.Repeat(" ", half)
+
+	if v < 0 {
+		fill := lipgloss.NewStyle().Foreground(amber.Alert).
+			Render(strings.Repeat("█", n))
+		return strings.Repeat(" ", half-n) + fill + rule + gap
+	}
+	fill := lipgloss.NewStyle().Foreground(amber.Of(frac)).
+		Render(strings.Repeat("█", n))
+	return gap + rule + fill + strings.Repeat(" ", half-n)
 }
 
 // --- stages -----------------------------------------------------------------

@@ -152,7 +152,37 @@ func (a *Attention) Forward(x [][]float32, p *pass) ([][]float32, [][][]float32)
 			attentionHead(a, h, groupSize, q, store, p, T, out, allWeights, true)
 		}
 	}
+
+	// Each head's own write into the residual stream, recorded before the heads
+	// are summed and become indistinguishable. Wo mixes across the concatenated
+	// heads, but it's linear, so the head's share is its slice of the input
+	// against the matching columns — see headContribution.
+	if p.wantWrites {
+		for h := 0; h < a.NHead; h++ {
+			p.record(h, a.headContribution(h, out[T-1]))
+		}
+	}
 	return MatMul(out, a.Wo), allWeights
+}
+
+// headContribution projects one head's slice of the concatenated attention
+// output through the matching columns of Wo, giving that head's additive share
+// of the block's attention output.
+//
+// concat is a single position's full NHead*HeadDim row. Wo's bias, if a model
+// ever has one, belongs to no head and is left out of every share.
+func (a *Attention) headContribution(h int, concat []float32) []float32 {
+	lo := h * a.HeadDim
+	c := make([]float32, a.Wo.Out)
+	for o := range c {
+		row := a.Wo.Weight[o*a.Wo.In : (o+1)*a.Wo.In]
+		var sum float32
+		for i := 0; i < a.HeadDim; i++ {
+			sum += concat[lo+i] * row[lo+i]
+		}
+		c[o] = sum
+	}
+	return c
 }
 
 // attentionHead computes one query head's attention output and writes it into

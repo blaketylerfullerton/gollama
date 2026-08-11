@@ -16,15 +16,20 @@ package trace
 type Kind string
 
 const (
-	KindStage     Kind = "stage"      // the residual stream, or a branch off it
-	KindAttention Kind = "attention"  // one head's causal attention weights
-	KindRotary    Kind = "rotary"     // one head's q either side of the rotation
-	KindNote      Kind = "note"       // commentary that isn't a tensor
-	KindLogitLens Kind = "logit_lens" // what the model would predict at this depth
+	KindStage       Kind = "stage"       // the residual stream, or a branch off it
+	KindAttention   Kind = "attention"   // one head's causal attention weights
+	KindRotary      Kind = "rotary"      // one head's q either side of the rotation
+	KindNote        Kind = "note"        // commentary that isn't a tensor
+	KindLogitLens   Kind = "logit_lens"  // what the model would predict at this depth
+	KindAttribution Kind = "attribution" // how much one component moved the output
 )
 
 // FormatVersion is bumped when a change would break an existing reader.
-const FormatVersion = 1
+//
+// 2 added attribution events, and the target-token fields on a logit-lens
+// readout. Both are additive, so a version-1 trace still reads — it simply has
+// no events of the new kind.
+const FormatVersion = 2
 
 // Header is the first line of a trace: what was run, and on what.
 type Header struct {
@@ -60,6 +65,26 @@ type Candidate struct {
 	Prob float64 `json:"prob"`
 }
 
+// Effect is how much one component moved one token's logit. Positive pushes the
+// token up, negative pushes it down, and the effects of every component on a
+// token sum to that token's output logit.
+type Effect struct {
+	ID    int     `json:"id"`
+	Text  string  `json:"text"`
+	Logit float32 `json:"logit"`
+}
+
+// Component names which part of a layer an attribution event is about. Heads are
+// numbered, so the Event's Head field carries the index and this says how to
+// read it.
+type Component string
+
+const (
+	ComponentHead  Component = "head"  // one attention head; Head is its index
+	ComponentMLP   Component = "mlp"   // the layer's MLP
+	ComponentEmbed Component = "embed" // the token embedding, at layer -1
+)
+
 // Event is one recorded moment. It's a single struct with omitted empties
 // rather than a type per Kind: it keeps the file trivially readable and spares
 // every consumer a type switch just to get at Layer and Kind.
@@ -87,8 +112,20 @@ type Event struct {
 	NormOut float64   `json:"norm_out,omitempty"`
 	CosSim  float64   `json:"cos_sim,omitempty"`
 
-	// KindLogitLens
-	Top []Candidate `json:"top,omitempty"`
+	// KindLogitLens. Target is the token the pass finally predicted; Rank and
+	// TargetProb are where it stood at this depth. Rank is 1-based, so zero
+	// means the field wasn't recorded rather than "first".
+	Top        []Candidate `json:"top,omitempty"`
+	Entropy    float64     `json:"entropy,omitempty"` // nats, over the whole vocabulary
+	TargetID   int         `json:"target_id,omitempty"`
+	TargetText string      `json:"target_text,omitempty"`
+	TargetRank int         `json:"target_rank,omitempty"`
+	TargetProb float64     `json:"target_prob,omitempty"`
+
+	// KindAttribution
+	Component Component `json:"component,omitempty"`
+	Norm      float64   `json:"norm,omitempty"` // length of this component's write
+	Effects   []Effect  `json:"effects,omitempty"`
 
 	// KindNote
 	Text string `json:"text,omitempty"`

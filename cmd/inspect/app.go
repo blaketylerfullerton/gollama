@@ -15,8 +15,9 @@ import (
 type view int
 
 const (
-	viewLens view = iota // how the prediction forms, layer by layer
-	viewAttention
+	viewLens        view = iota // how the prediction forms, layer by layer
+	viewAttention               // what each head looked at
+	viewAttribution             // which components moved the answer
 	viewStages
 	numViews
 )
@@ -27,6 +28,8 @@ func (v view) String() string {
 		return "logit lens"
 	case viewAttention:
 		return "attention"
+	case viewAttribution:
+		return "attribution"
 	default:
 		return "stages"
 	}
@@ -233,6 +236,8 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "2":
 		a.view = viewAttention
 	case "3":
+		a.view = viewAttribution
+	case "4":
 		a.view = viewStages
 	case "up", "k":
 		a.layer = max(0, a.layer-1)
@@ -293,6 +298,8 @@ func (a *app) View() string {
 		body = a.lensView()
 	case viewAttention:
 		body = a.attentionView()
+	case viewAttribution:
+		body = a.attributionView()
 	case viewStages:
 		body = a.stagesView()
 	}

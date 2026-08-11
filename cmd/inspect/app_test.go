@@ -46,7 +46,38 @@ func fixture() *trace.Trace {
 		add(trace.Event{Kind: trace.KindNote, Layer: l, Text: "gate 51% negative"})
 		add(trace.Event{Kind: trace.KindStage, Layer: l, Name: "+ mlp residual",
 			Tokens: 3, Dims: 8, MeanNorm: float64(10 * (l + 1))})
+
+		// Attribution: head 1 pushes " Paris" hard in the layer where the answer
+		// first leads, head 0 pushes against it, and the MLP is nearly inert.
+		// A mixture of signs is the case worth having in the fixture — a view
+		// that only ever renders positive bars can be wrong about direction and
+		// still look right.
+		for h := 0; h < 2; h++ {
+			sign := float32(1)
+			if h == 0 {
+				sign = -1
+			}
+			add(trace.Event{Kind: trace.KindAttribution, Layer: l, Head: h,
+				Component: trace.ComponentHead, Norm: 1.5 + float64(h),
+				Effects: []trace.Effect{
+					{ID: 12095, Text: " Paris", Logit: sign * float32(l+1)},
+					{ID: 264, Text: " a", Logit: -sign * 0.5},
+				}})
+		}
+		add(trace.Event{Kind: trace.KindAttribution, Layer: l,
+			Component: trace.ComponentMLP, Norm: 0.4,
+			Effects: []trace.Effect{
+				{ID: 12095, Text: " Paris", Logit: 0.05},
+				{ID: 264, Text: " a", Logit: 0.02},
+			}})
 	}
+
+	add(trace.Event{Kind: trace.KindAttribution, Layer: -1,
+		Component: trace.ComponentEmbed, Norm: 0.9,
+		Effects: []trace.Effect{
+			{ID: 12095, Text: " Paris", Logit: 0.1},
+			{ID: 264, Text: " a", Logit: 0.3},
+		}})
 
 	// A prediction that changes mid-stack, then matches the final output. The
 	// ids have to differ where the text differs, since "first leads" is decided
@@ -58,10 +89,22 @@ func fixture() *trace.Trace {
 	}{{264, " a", 0.3}, {12095, " Paris", 0.6}, {12095, " Paris", 0.9}}
 	for l, p := range preds {
 		add(trace.Event{Kind: trace.KindLogitLens, Layer: l,
-			Top: []trace.Candidate{{ID: p.id, Text: p.text, Prob: p.prob}}})
+			Top:        []trace.Candidate{{ID: p.id, Text: p.text, Prob: p.prob}},
+			Entropy:    2.5 - 0.5*float64(l),
+			TargetID:   12095,
+			TargetText: " Paris",
+			TargetRank: 3 - l, // climbing to the front
+			TargetProb: p.prob,
+		})
 	}
 	add(trace.Event{Kind: trace.KindLogitLens, Layer: nLayer,
-		Top: []trace.Candidate{{ID: 12095, Text: " Paris", Prob: 0.65}}})
+		Top:        []trace.Candidate{{ID: 12095, Text: " Paris", Prob: 0.65}},
+		Entropy:    1.1,
+		TargetID:   12095,
+		TargetText: " Paris",
+		TargetRank: 1,
+		TargetProb: 0.65,
+	})
 
 	return tr
 }
@@ -279,5 +322,65 @@ func TestWindowKeepsSelectionVisible(t *testing.T) {
 			t.Errorf("window(%d,%d,%d) = [%d,%d): selection not visible",
 				tc.total, tc.sel, tc.height, lo, hi)
 		}
+	}
+}
+
+// The attribution view has to show direction, not just magnitude: a head that
+// pushes the answer down is as much of a finding as one that pushes it up, and
+// the two are indistinguishable if only the size is drawn.
+func TestAttributionViewShowsBothDirections(t *testing.T) {
+	a := newApp(fixture())
+	a.Update(tea.WindowSizeMsg{Width: 110, Height: 40})
+	a.view = viewAttribution
+	a.layer = 1
+	out := a.View()
+
+	for _, want := range []string{"head 0", "head 1", "mlp", " Paris"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("attribution view is missing %q:\n%s", want, out)
+		}
+	}
+	// Head 1 is +2 in layer 1, head 0 is -2.
+	if !strings.Contains(out, "+2.000") || !strings.Contains(out, "-2.000") {
+		t.Errorf("attribution view should show signed effects:\n%s", out)
+	}
+	if !strings.Contains(out, "largest across the whole pass") {
+		t.Errorf("attribution view should rank contributors across layers:\n%s", out)
+	}
+}
+
+// Attribution is opt-in, so a trace made without it must say so rather than
+// render an empty pane.
+func TestAttributionViewHandlesMissingAttribution(t *testing.T) {
+	tr := fixture()
+	var kept []trace.Event
+	for _, e := range tr.Events {
+		if e.Kind != trace.KindAttribution {
+			kept = append(kept, e)
+		}
+	}
+	tr.Events = kept
+
+	a := newApp(tr)
+	a.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	a.view = viewAttribution
+	if out := a.View(); !strings.Contains(out, "No attribution") {
+		t.Errorf("expected an explanation, got:\n%s", out)
+	}
+}
+
+// The lens view gained two columns whose whole point is that they disagree with
+// the top row: an answer can be climbing the ranks well before it leads.
+func TestLensViewShowsRankAndEntropy(t *testing.T) {
+	a := newApp(fixture())
+	a.Update(tea.WindowSizeMsg{Width: 110, Height: 40})
+	a.view = viewLens
+	out := a.View()
+
+	if !strings.Contains(out, "#3") {
+		t.Errorf("lens view should show the target's rank at layers where it isn't leading:\n%s", out)
+	}
+	if !strings.Contains(out, "2.50") {
+		t.Errorf("lens view should show entropy:\n%s", out)
 	}
 }

@@ -89,6 +89,31 @@ func (t *Trace) Kind(k Kind) []Event {
 	return out
 }
 
+// Attributions returns the attribution events for one layer, in the order the
+// components ran: every attention head, then the MLP. Layer -1 holds the token
+// embedding's own contribution.
+func (t *Trace) Attributions(layer int) []Event {
+	var out []Event
+	for _, e := range t.Events {
+		if e.Kind == KindAttribution && e.Layer == layer {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// EffectOn returns this event's effect on one token, and whether the token was
+// among the ones attributed. Attribution covers only the candidates that were in
+// contention, so a miss is normal rather than an error.
+func (e Event) EffectOn(id int) (float32, bool) {
+	for _, f := range e.Effects {
+		if f.ID == id {
+			return f.Logit, true
+		}
+	}
+	return 0, false
+}
+
 // LayerEvent finds a single event by layer, kind and head. head is ignored for
 // kinds that don't have one. Returns false when there's no match.
 func (t *Trace) LayerEvent(layer int, k Kind, head int) (Event, bool) {

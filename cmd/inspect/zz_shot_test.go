@@ -23,7 +23,7 @@ func TestZZShot(t *testing.T) {
 	a := newApp(tr)
 	a.w, a.h = 110, 34
 	var buf []byte
-	for _, v := range []view{viewLens, viewAttention, viewStages} {
+	for _, v := range []view{viewLens, viewAttention, viewAttribution, viewStages} {
 		a.view = v
 		a.layer = 14
 		buf = append(buf, a.View()...)

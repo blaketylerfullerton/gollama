@@ -108,7 +108,8 @@ func runPrompt(gpt *model.GPT, tok *tokenizer.Tokenizer, req request, out chan<-
 		},
 	}
 	collector := trace.NewCollector(header, trace.Opts{
-		Vocab: func(id int) string { return tok.Decode([]int{id}) },
+		Vocab:       func(id int) string { return tok.Decode([]int{id}) },
+		Attribution: true,
 	})
 	gpt.Trace = collector
 	defer func() { gpt.Trace = nil }()
@@ -121,7 +122,7 @@ func runPrompt(gpt *model.GPT, tok *tokenizer.Tokenizer, req request, out chan<-
 	if err != nil {
 		return err
 	}
-	collector.LogitLens(cfg.NLayer, logits) // the real output, for comparison
+	collector.LogitLens(cfg.NLayer, logits, model.Argmax(logits)) // the real output, for comparison
 	out <- stepMsg{label: "prefill", tr: collector.Snapshot()}
 
 	// Decode: one token at a time, each with its own trace. That's what makes
@@ -148,7 +149,7 @@ func runPrompt(gpt *model.GPT, tok *tokenizer.Tokenizer, req request, out chan<-
 		if err != nil {
 			return err
 		}
-		collector.LogitLens(cfg.NLayer, logits)
+		collector.LogitLens(cfg.NLayer, logits, model.Argmax(logits))
 		out <- stepMsg{label: text, tr: collector.Snapshot()}
 	}
 	return nil

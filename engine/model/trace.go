@@ -45,9 +45,55 @@ type Tracer interface {
 // projection per layer, and the LM head is the largest matmul in the model. Only
 // the final position is projected, which keeps it to roughly one extra forward
 // pass worth of work overall.
+//
+// target is the token the pass finally predicted — the argmax of the output
+// logits. It's passed alongside so a reader can ask where that token ranked at
+// this depth, which is the question top-k alone can't answer: an answer sitting
+// at rank 40 and climbing looks identical to one that never appears. Because the
+// target isn't known until the stack is done, the readouts are emitted after it,
+// in layer order, rather than interleaved with the blocks that produced them.
 type LogitLensTracer interface {
 	Tracer
-	LogitLens(layer int, logits []float32)
+	LogitLens(layer int, logits []float32, target int)
+}
+
+// Component identifies which part of a layer wrote into the residual stream.
+// Non-negative values are attention head indices; the constants below cover the
+// writes that aren't a head.
+const (
+	ComponentMLP   = -1 // the layer's MLP
+	ComponentEmbed = -2 // the token embedding, at layer -1
+)
+
+// AttributionTracer is an optional extension for direct logit attribution: how
+// much each component's write into the residual stream moved the final logits.
+//
+// Every component adds to the same stream, and the last thing that happens to
+// that stream is a norm and one linear map. Hold the norm's scaling factor fixed
+// at what the finished stream produced and both steps are linear, so the output
+// logit for a token is exactly the sum of the components' individual effects on
+// it. That decomposition is what separates "this head looked at that token" —
+// which the attention weights already show — from "this head is why the answer
+// came out the way it did", which they can't.
+//
+// Effects are reported against the pass's own top candidates rather than the
+// whole vocabulary: the interesting question is which components pushed the
+// tokens that were actually in contention, and a full projection per component
+// would cost sixteen forward passes a layer.
+//
+// Opt-in by type assertion, like the lens, and gated further by
+// AttributionTopK so a tracer that only sometimes wants attribution doesn't have
+// to change its type to say so.
+type AttributionTracer interface {
+	Tracer
+	// AttributionTopK is how many candidate tokens to attribute to. Zero or
+	// less turns attribution off, and the engine then does none of the work.
+	AttributionTopK() int
+	// Attribution reports one component's direct effect on each of tokens.
+	// component is an attention head index, or one of the Component constants.
+	// norm is the length of the component's write, which ranks components by
+	// how much they moved the stream at all, independent of any token.
+	Attribution(layer, component int, tokens []int, effects []float32, norm float64)
 }
 
 // Trace is the handle threaded through the forward pass. A zero Trace (nil
@@ -63,6 +109,17 @@ type Trace struct {
 func (t Trace) lens() LogitLensTracer {
 	l, _ := t.Out.(LogitLensTracer)
 	return l
+}
+
+// attrib returns the tracer as an AttributionTracer, or nil if it doesn't want
+// attribution — either because it can't receive it or because it asked for zero
+// tokens.
+func (t Trace) attrib() AttributionTracer {
+	a, ok := t.Out.(AttributionTracer)
+	if !ok || a.AttributionTopK() <= 0 {
+		return nil
+	}
+	return a
 }
 
 // On reports whether anyone is listening. Guard expensive trace-only work with

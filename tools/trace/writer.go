@@ -17,8 +17,14 @@ type Opts struct {
 	// this. The weights are O(T²) per head per layer, so a long prompt would
 	// otherwise dominate.
 	MaxAttentionTokens int
-	// TopK is how many candidates to keep per logit-lens readout.
+	// TopK is how many candidates to keep per logit-lens readout, and how many
+	// tokens to attribute components against.
 	TopK int
+	// Attribution records how much each attention head and MLP moved the output
+	// logits. Off by default: it costs one extra Wo-sized matmul per layer, plus
+	// an event per component, and a consumer that only draws attention patterns
+	// has no use for it.
+	Attribution bool
 	// Vocab, when set, resolves token ids to text so a reader needs no
 	// tokenizer. Returning "" for unknown ids is fine.
 	Vocab func(id int) string
@@ -104,6 +110,21 @@ func (w *Writer) Note(layer int, format string, args ...any) {
 }
 
 // LogitLens records what the model would predict if this layer were the last.
-func (w *Writer) LogitLens(layer int, logits []float32) {
-	w.emit(lensEvent(w.opts, layer, logits))
+func (w *Writer) LogitLens(layer int, logits []float32, target int) {
+	w.emit(lensEvent(w.opts, layer, logits, target))
+}
+
+// AttributionTopK reports how many tokens to attribute against, or zero to tell
+// the engine not to compute attribution at all.
+func (w *Writer) AttributionTopK() int { return w.opts.attributionTopK() }
+
+func (w *Writer) Attribution(layer, component int, tokens []int, effects []float32, norm float64) {
+	w.emit(attributionEvent(w.opts, layer, component, tokens, effects, norm))
+}
+
+func (o Opts) attributionTopK() int {
+	if !o.Attribution {
+		return 0
+	}
+	return o.TopK
 }

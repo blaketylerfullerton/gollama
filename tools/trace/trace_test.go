@@ -21,8 +21,12 @@ func testHeader() Header {
 // The Writer must satisfy both interfaces, or the engine silently won't ask it
 // for intermediate predictions.
 var (
-	_ model.Tracer          = (*Writer)(nil)
-	_ model.LogitLensTracer = (*Writer)(nil)
+	_ model.Tracer            = (*Writer)(nil)
+	_ model.LogitLensTracer   = (*Writer)(nil)
+	_ model.AttributionTracer = (*Writer)(nil)
+	_ model.Tracer            = (*Collector)(nil)
+	_ model.LogitLensTracer   = (*Collector)(nil)
+	_ model.AttributionTracer = (*Collector)(nil)
 )
 
 func TestRoundTrip(t *testing.T) {
@@ -37,13 +41,14 @@ func TestRoundTrip(t *testing.T) {
 	w.Attention(0, 1, [][]float32{{1}, {0.4, 0.6}})
 	w.Rotary(0, 1, []float32{1, 0}, []float32{0, 1})
 	w.Note(0, "gate %d%% negative", 51)
-	w.LogitLens(0, []float32{0, 5, 0, 0, 0, 0, 0, 0})
+	w.LogitLens(0, []float32{0, 5, 0, 0, 0, 0, 0, 0}, 1)
+	w.Attribution(0, 1, []int{1, 3}, []float32{2.5, -0.5}, 4)
 
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if w.Events() != 6 {
-		t.Errorf("recorded %d events, want 6", w.Events())
+	if w.Events() != 7 {
+		t.Errorf("recorded %d events, want 7", w.Events())
 	}
 
 	tr, err := Read(bytes.NewReader(buf.Bytes()))
@@ -56,8 +61,8 @@ func TestRoundTrip(t *testing.T) {
 	if tr.Header.Prompt != "hi there" || len(tr.Header.Tokens) != 2 {
 		t.Errorf("header did not survive: %+v", tr.Header)
 	}
-	if len(tr.Events) != 6 {
-		t.Fatalf("read %d events, want 6", len(tr.Events))
+	if len(tr.Events) != 7 {
+		t.Fatalf("read %d events, want 7", len(tr.Events))
 	}
 
 	// Sequence numbers must be dense and ordered, so a reader can rely on them.
@@ -85,6 +90,28 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if lens[0].Top[0].Text != "tok" {
 		t.Errorf("Vocab was not applied, got %q", lens[0].Top[0].Text)
+	}
+	// The target was passed as id 1, which is also the argmax, so it ranks first
+	// and takes essentially all the probability mass.
+	if lens[0].TargetRank != 1 {
+		t.Errorf("target rank is %d, want 1", lens[0].TargetRank)
+	}
+	if lens[0].Entropy <= 0 {
+		t.Errorf("entropy is %v, want a positive number of nats", lens[0].Entropy)
+	}
+
+	attr := tr.Attributions(0)
+	if len(attr) != 1 {
+		t.Fatalf("read %d attribution events, want 1", len(attr))
+	}
+	if attr[0].Component != ComponentHead || attr[0].Head != 1 {
+		t.Errorf("component did not survive: %q head %d", attr[0].Component, attr[0].Head)
+	}
+	if v, ok := attr[0].EffectOn(3); !ok || v != -0.5 {
+		t.Errorf("effect on token 3 is %v (found %v), want -0.5", v, ok)
+	}
+	if _, ok := attr[0].EffectOn(99); ok {
+		t.Error("an unattributed token reported an effect")
 	}
 }
 

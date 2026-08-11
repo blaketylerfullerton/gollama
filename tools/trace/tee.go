@@ -7,12 +7,13 @@ import (
 // Tee fans trace events out to several tracers, so one run can both print
 // a walkthrough and write a trace file.
 //
-// The subtlety is the logit lens. The engine decides whether to compute it by
-// type-asserting the tracer to model.LogitLensTracer, and it costs one extra LM
-// head projection per layer — the largest matmul in the model. So the returned
-// value implements that interface only when at least one child would actually
-// use it. A single child is returned unwrapped, which preserves its exact
-// interface set.
+// The subtlety is the optional extensions. The engine decides whether to compute
+// the logit lens and the attribution by type-asserting the tracer, and both cost
+// real work — an LM head projection per layer, and a Wo-sized matmul per layer.
+// So the returned value must advertise an extension only when some child would
+// actually use it, which is why there's a type per combination rather than one
+// that implements everything. A single child is returned unwrapped, which
+// preserves its exact interface set.
 func Tee(children ...model.Tracer) model.Tracer {
 	switch len(children) {
 	case 0:
@@ -20,16 +21,31 @@ func Tee(children ...model.Tracer) model.Tracer {
 	case 1:
 		return children[0]
 	}
+
 	t := tee(children)
+	var wantLens, wantAttrib bool
 	for _, c := range children {
 		if _, ok := c.(model.LogitLensTracer); ok {
-			return t // tee implements LogitLensTracer
+			wantLens = true
+		}
+		if a, ok := c.(model.AttributionTracer); ok && a.AttributionTopK() > 0 {
+			wantAttrib = true
 		}
 	}
-	return quiet{t} // no child wants the lens, so don't advertise it
+
+	switch {
+	case wantLens && wantAttrib:
+		return teeBoth{t}
+	case wantLens:
+		return teeLens{t}
+	case wantAttrib:
+		return teeAttrib{t}
+	default:
+		return t
+	}
 }
 
-// tee forwards to every child, including the logit lens.
+// tee forwards the four core methods and nothing else.
 type tee []model.Tracer
 
 func (t tee) Stage(layer int, name string, x [][]float32) {
@@ -56,31 +72,59 @@ func (t tee) Note(layer int, format string, args ...any) {
 	}
 }
 
-func (t tee) LogitLens(layer int, logits []float32) {
+// logitLens and attribution hold the forwarding logic, so the wrapper types
+// below differ only in which of them they expose.
+func (t tee) logitLens(layer int, logits []float32, target int) {
 	for _, out := range t {
 		if lens, ok := out.(model.LogitLensTracer); ok {
-			lens.LogitLens(layer, logits)
+			lens.LogitLens(layer, logits, target)
 		}
 	}
 }
 
-// quiet forwards the four core methods and nothing else. The methods are
-// written out rather than promoted from an embedded tee, because embedding would
-// also promote LogitLens and defeat the point of this type.
-type quiet struct{ children tee }
-
-func (q quiet) Stage(layer int, name string, x [][]float32) {
-	q.children.Stage(layer, name, x)
+// attributionTopK is the largest any child asked for. A child that wanted fewer
+// receives more than it asked for, which is harmless — the alternative is
+// running attribution once per distinct k.
+func (t tee) attributionTopK() int {
+	k := 0
+	for _, out := range t {
+		if a, ok := out.(model.AttributionTracer); ok && a.AttributionTopK() > k {
+			k = a.AttributionTopK()
+		}
+	}
+	return k
 }
 
-func (q quiet) Attention(layer, head int, weights [][]float32) {
-	q.children.Attention(layer, head, weights)
+func (t tee) attribution(layer, component int, tokens []int, effects []float32, norm float64) {
+	for _, out := range t {
+		if a, ok := out.(model.AttributionTracer); ok && a.AttributionTopK() > 0 {
+			a.Attribution(layer, component, tokens, effects, norm)
+		}
+	}
 }
 
-func (q quiet) Rotary(layer, head int, before, after []float32) {
-	q.children.Rotary(layer, head, before, after)
+// The wrappers embed tee, which promotes the four core methods, and lift only
+// the extensions their children asked for. Embedding is what keeps this to one
+// line per method instead of four types' worth of forwarding.
+type teeLens struct{ tee }
+
+func (t teeLens) LogitLens(layer int, logits []float32, target int) {
+	t.logitLens(layer, logits, target)
 }
 
-func (q quiet) Note(layer int, format string, args ...any) {
-	q.children.Note(layer, format, args...)
+type teeAttrib struct{ tee }
+
+func (t teeAttrib) AttributionTopK() int { return t.attributionTopK() }
+func (t teeAttrib) Attribution(layer, component int, tokens []int, effects []float32, norm float64) {
+	t.attribution(layer, component, tokens, effects, norm)
+}
+
+type teeBoth struct{ tee }
+
+func (t teeBoth) LogitLens(layer int, logits []float32, target int) {
+	t.logitLens(layer, logits, target)
+}
+func (t teeBoth) AttributionTopK() int { return t.attributionTopK() }
+func (t teeBoth) Attribution(layer, component int, tokens []int, effects []float32, norm float64) {
+	t.attribution(layer, component, tokens, effects, norm)
 }

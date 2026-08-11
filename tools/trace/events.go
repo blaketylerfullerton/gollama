@@ -55,17 +55,102 @@ func noteEvent(layer int, format string, args ...any) Event {
 	return Event{Kind: KindNote, Layer: layer, Text: fmt.Sprintf(format, args...)}
 }
 
-func lensEvent(opts Opts, layer int, logits []float32) Event {
+func lensEvent(opts Opts, layer int, logits []float32, target int) Event {
 	cands := model.TopCandidates(logits, 1.0, opts.TopK)
 	top := make([]Candidate, len(cands))
 	for i, c := range cands {
-		text := ""
-		if opts.Vocab != nil {
-			text = opts.Vocab(c.ID)
-		}
-		top[i] = Candidate{ID: c.ID, Text: text, Prob: c.Prob}
+		top[i] = Candidate{ID: c.ID, Text: opts.text(c.ID), Prob: c.Prob}
 	}
-	return Event{Kind: KindLogitLens, Layer: layer, Top: top}
+
+	e := Event{Kind: KindLogitLens, Layer: layer, Top: top, Entropy: entropy(logits)}
+	if target >= 0 && target < len(logits) {
+		// Where the answer stood at this depth. Top-k can't say: a token at
+		// rank 40 and a token that never appears look identical from the top of
+		// the list, and the difference between them is the whole story of how a
+		// prediction forms.
+		e.TargetID = target
+		e.TargetText = opts.text(target)
+		e.TargetRank = rank(logits, target)
+		e.TargetProb = probOf(logits, target)
+	}
+	return e
+}
+
+func attributionEvent(opts Opts, layer, component int, tokens []int, effects []float32, norm float64) Event {
+	e := Event{Kind: KindAttribution, Layer: layer, Norm: norm}
+	switch component {
+	case model.ComponentMLP:
+		e.Component = ComponentMLP
+	case model.ComponentEmbed:
+		e.Component = ComponentEmbed
+	default:
+		e.Component, e.Head = ComponentHead, component
+	}
+
+	e.Effects = make([]Effect, len(tokens))
+	for i, id := range tokens {
+		e.Effects[i] = Effect{ID: id, Text: opts.text(id), Logit: effects[i]}
+	}
+	return e
+}
+
+// text resolves a token id, or returns "" when the trace was made without a
+// vocabulary.
+func (o Opts) text(id int) string {
+	if o.Vocab == nil {
+		return ""
+	}
+	return o.Vocab(id)
+}
+
+// entropy is the Shannon entropy of the softmax over the whole vocabulary, in
+// nats. It's the one number that says how committed the model is at this depth
+// without reference to any particular token: near log(vocab) is a model with no
+// idea, near zero is one that has made up its mind.
+func entropy(logits []float32) float64 {
+	maxL, sum := maxLogit(logits), 0.0
+	for _, l := range logits {
+		sum += math.Exp(float64(l) - maxL)
+	}
+	logZ := maxL + math.Log(sum)
+
+	var h float64
+	for _, l := range logits {
+		logp := float64(l) - logZ
+		h -= math.Exp(logp) * logp
+	}
+	return h
+}
+
+// rank is the 1-based position of id when logits are sorted descending. Ties
+// resolve in id's favour, which matches how a sort would place the first of
+// several equal values.
+func rank(logits []float32, id int) int {
+	r := 1
+	for i, l := range logits {
+		if l > logits[id] || (l == logits[id] && i < id) {
+			r++
+		}
+	}
+	return r
+}
+
+func probOf(logits []float32, id int) float64 {
+	maxL, sum := maxLogit(logits), 0.0
+	for _, l := range logits {
+		sum += math.Exp(float64(l) - maxL)
+	}
+	return math.Exp(float64(logits[id])-maxL) / sum
+}
+
+func maxLogit(logits []float32) float64 {
+	m := float64(logits[0])
+	for _, l := range logits[1:] {
+		if float64(l) > m {
+			m = float64(l)
+		}
+	}
+	return m
 }
 
 // clip copies at most n leading values, so the engine stays free to reuse the

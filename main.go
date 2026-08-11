@@ -177,7 +177,7 @@ func run(s *session, verbose bool, tracePath string) error {
 	if traceWriter != nil {
 		// Record the real output as one more lens readout, past the last block,
 		// so the inspector has a row to compare intermediate layers against.
-		traceWriter.LogitLens(cfg.NLayer, last)
+		traceWriter.LogitLens(cfg.NLayer, last, model.Argmax(last))
 	}
 
 	// --- generation ---------------------------------------------------------
@@ -252,7 +252,8 @@ func openTrace(path string, s *session, labels []string) (*trace.Writer, func(),
 		return nil, func() {}, err
 	}
 	w, err := trace.NewWriter(f, traceHeader(s, labels), trace.Opts{
-		Vocab: func(id int) string { return s.tok.Decode([]int{id}) },
+		Vocab:       func(id int) string { return s.tok.Decode([]int{id}) },
+		Attribution: true,
 	})
 	if err != nil {
 		f.Close()

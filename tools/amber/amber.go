@@ -49,7 +49,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// Ramp is the data track: ten steps of hue 220°, from near-black to near-white.
+// Ramp is the data track: ten steps of amber at hue 30°, near-black to near-white.
 //
 // The hue and saturation are fixed and the lightness climbs in even perceptual
 // steps, so the sequence has no landmarks in it — no point where the colour
@@ -59,9 +59,9 @@ import (
 // gradient rather than as banding.
 //
 // The ends are deliberately not pure black and pure white. Ramp[0] is a very
-// dark blue that still reads as tinted against a black terminal, so a
+// dark brown that still reads as warm against a black terminal, so a
 // zero-activation cell is visibly *part of the picture* rather than a hole in
-// it; Ramp[9] is a pale tint rather than white, so peak activation still
+// it; Ramp[9] is a cream rather than white, so peak activation still
 // belongs to the same family as everything below it.
 var Ramp = [10]lipgloss.Color{
 	"#2B1500", // 0  nothing here
@@ -84,7 +84,7 @@ var Ramp = [10]lipgloss.Color{
 // same thing here as it does in the matrix.
 //
 // The bottom of the ramp is not available to anything with words in it. Against
-// a dark terminal Ramp[3] comes out at 3.0:1, under the 4.5:1 that body text
+// a dark terminal Ramp[3] comes out at 2.9:1, under the 4.5:1 that body text
 // needs. That constraint used to squeeze the whole interface, back when
 // the chrome lived on this ramp; now that words are Neutral's problem, it binds
 // on almost nothing, and the low steps are free to be what they should always
@@ -103,31 +103,38 @@ const (
 )
 
 // Neutral is the furniture track: the same ten-step construction at the same
-// lightnesses, with the saturation taken out and a trace of warmth left in.
+// lightnesses, with the saturation taken out.
 //
-// The warmth is doing one job. A neutral built on the blue of Ramp would make
-// the chrome read as a washed-out version of the data rather than as a
-// different kind of thing, and the separation between the two tracks is the
-// entire point. Pulling the greys slightly warm puts them across the wheel from
-// the hue, so a border reads as *absent of colour* next to an attention cell
-// instead of as a faded one.
+// It is not quite a straight grey, and the deviation is deliberate in both
+// directions. The low steps are pulled very slightly cool, because that is the
+// half of the track where the risk lives: a warm dark grey sitting next to the
+// amber ramp reads as a *dimmer amber* — as data that has faded — and the whole
+// point of the split is that furniture is a different kind of thing, not a
+// weaker version of the same thing. Cool greys sit across the wheel from the
+// hue, so a border reads as absent of colour rather than as low on the ramp.
+//
+// The top steps drift back warm, ending in a cream rather than a white. Up
+// there the chroma is far too small to be seen as a hue at all — Neutral[9] is
+// simply "white" to anyone reading it — so it costs nothing, and a page of text
+// in a faintly warm white is easier to sit in front of than one in a clinical
+// blue-white. Cool where it has to be, warm where it's free to be.
 //
 // The contrast floor that Ramp mostly escaped lands here instead, and harder,
-// because this is where all the words are. Neutral[5] is about 4.3:1 on black —
+// because this is where all the words are. Neutral[5] is about 4.2:1 on black —
 // close, but under — so text starts at Muted and everything below it is
 // structure: rules, borders, the parts of the frame you should be able to look
 // past. That is the whole rule. Above the floor, prose; below it, furniture.
 var Neutral = [10]lipgloss.Color{
-	"#0F0F0E", // 0  the darkest thing that isn't the terminal itself
-	"#1C1C1A", // 1
-	"#2B2A28", // 2  borders
-	"#3D3C39", // 3  rules
-	"#57554F", // 4
-	"#74716A", // 5  the contrast floor sits just above here
-	"#94908A", // 6  labels
-	"#B5B1A9", // 7  secondary text
-	"#D8D4CC", // 8  body text
-	"#FAF9F5", // 9  headings, and the ink on nothing
+	"#0E0E10", // 0  the darkest thing that isn't the terminal itself
+	"#1A1B1D", // 1
+	"#282A2D", // 2  rules, gauge tracks
+	"#393B3F", // 3  borders
+	"#545559", // 4
+	"#6E7075", // 5  the contrast floor sits just above here
+	"#919196", // 6  labels
+	"#B4B3B2", // 7  secondary text
+	"#D8D6D2", // 8  body text
+	"#FAF9F5", // 9  headings, and the ink on a reversed field
 }
 
 // Named steps on the furniture track.
@@ -152,7 +159,17 @@ const Accent = Core
 // Alert is the single exception to the two tracks — see the package comment.
 // Errors are a state rather than a magnitude, and rare enough that giving them
 // a hue costs nothing and buys recognition before the words are read.
-const Alert = lipgloss.Color("#FF6B5C")
+//
+// It is a rose rather than the obvious red, and that is forced by the accent.
+// A plain error red lands around 5°, which is only about 25° from the amber at
+// 30° — near enough that a warning and a keybinding read as the same family at
+// a glance, and much nearer than that for the ~8% of men with a red-green
+// deficiency, who would be left distinguishing them by brightness alone. Since
+// the whole justification for Alert having a hue is that the hue is recognised
+// before the words are, a hue that isn't reliably recognised is worse than none
+// at all. Swinging to 349° buys real separation while still reading as alarm,
+// which red's neighbours on the other side — going yellow — would not.
+const Alert = lipgloss.Color("#FF4D6D")
 
 // N returns the furniture colour at a level, clamped.
 func N(level int) lipgloss.Color {

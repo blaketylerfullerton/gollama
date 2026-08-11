@@ -59,8 +59,14 @@ func (c *Collector) Note(layer int, format string, args ...any) {
 	c.emit(noteEvent(layer, format, args...))
 }
 
-func (c *Collector) LogitLens(layer int, logits []float32) {
-	c.emit(lensEvent(c.opts, layer, logits))
+func (c *Collector) LogitLens(layer int, logits []float32, target int) {
+	c.emit(lensEvent(c.opts, layer, logits, target))
+}
+
+func (c *Collector) AttributionTopK() int { return c.opts.attributionTopK() }
+
+func (c *Collector) Attribution(layer, component int, tokens []int, effects []float32, norm float64) {
+	c.emit(attributionEvent(c.opts, layer, component, tokens, effects, norm))
 }
 
 // Snapshot returns a copy of the collected trace, safe to hand to another

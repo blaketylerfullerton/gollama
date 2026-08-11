@@ -3,6 +3,7 @@ package model
 
 import (
 	"fmt"
+	"math"
 	"math/rand/v2"
 )
 
@@ -36,6 +37,36 @@ type pass struct {
 	offset   int      // absolute position of x's first row
 	layer    int      // -1 outside the block stack
 	tr       Trace
+
+	// Attribution state. writes accumulates every component's addition to the
+	// residual stream at the final position, in the order the components ran;
+	// it stays nil unless a tracer asked for attribution, and the recording
+	// sites all short-circuit on that. Only the final position is kept, for the
+	// same reason the lens only projects it: it's the position whose prediction
+	// the pass is about.
+	wantWrites bool
+	writes     []residualWrite
+}
+
+// residualWrite is one component's additive contribution to the residual
+// stream. component is an attention head index or one of the Component
+// constants.
+type residualWrite struct {
+	layer, component int
+	vec              []float32
+}
+
+// record keeps a copy of one component's write. The caller's slice is usually a
+// row of a buffer the pass still owns, so this copies for the same reason the
+// Tracer contract makes its implementations copy.
+func (p *pass) record(component int, vec []float32) {
+	if !p.wantWrites {
+		return
+	}
+	p.writes = append(p.writes, residualWrite{
+		layer: p.layer, component: component,
+		vec: append([]float32(nil), vec...),
+	})
 }
 
 func (p *pass) setLayer(i int) {
@@ -104,10 +135,11 @@ func (g *GPT) ForwardCached(ids []int, cache *KVCache) ([]float32, error) {
 
 func (g *GPT) newPass(cache *KVCache, offset, need int) *pass {
 	g.ensureRotary(need)
+	tr := Trace{Out: g.Trace, Layer: -1}
 	return &pass{
 		cos: g.cos, sin: g.sin,
 		cache: cache, offset: offset, layer: -1,
-		tr: Trace{Out: g.Trace, Layer: -1},
+		tr: tr, wantWrites: tr.attrib() != nil,
 	}
 }
 
@@ -116,31 +148,108 @@ func (g *GPT) newPass(cache *KVCache, offset, need int) *pass {
 func (g *GPT) stack(ids []int, p *pass) [][]float32 {
 	x := Embed(g.WTE, ids, g.Config.NEmbed)
 	p.tr.Stage("token embeddings", x)
+	// The embedding is itself a write into the residual stream. Recording it
+	// keeps the decomposition complete, so the attributed effects sum to the
+	// logit rather than to the logit minus an unexplained remainder.
+	p.record(ComponentEmbed, x[len(x)-1])
 
 	lens := p.tr.lens()
+	var resid [][]float32 // last position after each block, for the lens
+	if lens != nil {
+		resid = make([][]float32, 0, len(g.Blocks))
+	}
+
 	for i := range g.Blocks {
 		p.setLayer(i)
 		x = g.Blocks[i].Forward(x, p)
 		if lens != nil {
-			lens.LogitLens(i, g.logitsAt(x))
+			resid = append(resid, append([]float32(nil), x[len(x)-1]...))
 		}
 	}
 
 	p.setLayer(-1)
+	// The scaling the final norm is about to apply, captured before it runs.
+	// Attribution needs it as a constant: with it held fixed the norm is a
+	// linear map, which is what makes the logits decompose across components.
+	scale := g.FinalNorm.Scale(x[len(x)-1])
 	x = g.FinalNorm.Forward(x)
 	p.tr.Stage("final norm", x)
+
+	if lens != nil || p.wantWrites {
+		// The final position's logits, which the caller will also compute. One
+		// extra row through the LM head, and only when something is tracing.
+		final := MatMul(x[len(x)-1:], g.LMHead)[0]
+		target := Argmax(final)
+		for i, r := range resid {
+			lens.LogitLens(i, g.lensLogits(r), target)
+		}
+		g.attribute(p, scale, final)
+	}
 	return x
 }
 
-// logitsAt reads out the model's prediction from a mid-stack residual stream:
+// lensLogits reads out the model's prediction from a mid-stack residual stream:
 // apply the final norm and the LM head as if this layer were the last one.
 //
 // Only the final position is projected. That's the position whose next-token
 // distribution we care about, and it keeps the cost to one row through the LM
 // head instead of every row.
-func (g *GPT) logitsAt(x [][]float32) []float32 {
-	last := x[len(x)-1:]
-	return MatMul(g.FinalNorm.Forward(last), g.LMHead)[0]
+func (g *GPT) lensLogits(v []float32) []float32 {
+	return MatMul([][]float32{g.FinalNorm.ForwardVec(v)}, g.LMHead)[0]
+}
+
+// attribute reports how much each recorded residual-stream write moved the
+// final logits for the pass's top candidates.
+//
+// The whole thing rests on one observation: the residual stream that reaches the
+// LM head is a plain sum of every component's write, and everything after it is
+// linear once the norm's scaling factor is held at the value the finished stream
+// produced. So a component's effect on a token is its write dotted with that
+// token's unembedding row, pre-multiplied by the norm's learned weight and
+// scale. Sum the effects over every component and you get the logit back.
+//
+// Cost is one dot product per component per candidate token — a few hundred
+// thousand multiply-adds for a whole pass, against the 155M-parameter LM head.
+// Folding the norm into the unembedding directions once, rather than into every
+// component, is what keeps it there.
+func (g *GPT) attribute(p *pass, scale float64, final []float32) {
+	at := p.tr.attrib()
+	if at == nil || len(p.writes) == 0 {
+		return
+	}
+
+	cands := TopCandidates(final, 1.0, at.AttributionTopK())
+	tokens := make([]int, len(cands))
+	dirs := make([][]float32, len(cands))
+	for j, c := range cands {
+		tokens[j] = c.ID
+		row := g.LMHead.Weight[c.ID*g.LMHead.In : (c.ID+1)*g.LMHead.In]
+		d := make([]float32, g.LMHead.In)
+		for i := range d {
+			d[i] = float32(scale) * g.FinalNorm.Weight[i] * row[i]
+		}
+		dirs[j] = d
+	}
+
+	for _, wr := range p.writes {
+		effects := make([]float32, len(dirs))
+		for j, d := range dirs {
+			var sum float32
+			for i, v := range wr.vec {
+				sum += v * d[i]
+			}
+			effects[j] = sum
+		}
+		at.Attribution(wr.layer, wr.component, tokens, effects, vecNorm(wr.vec))
+	}
+}
+
+func vecNorm(v []float32) float64 {
+	var sum float64
+	for _, x := range v {
+		sum += float64(x) * float64(x)
+	}
+	return math.Sqrt(sum)
 }
 
 // RotaryTables exposes the cos/sin lookup tables for inspection. They're built
