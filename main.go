@@ -58,27 +58,14 @@ func main() {
 	// multi-second load. It's skipped when stdout isn't a terminal so piping
 	// still works, and skipped with -no-splash, in which case the default
 	// checkpoint is used if it's there.
+	//
+	// Every screen — splash, picker, about, history, chat — runs inside this one
+	// call now, on one alternate screen. chatEngine is the only thing tui can't
+	// do for itself: it's what turns a typed line into generated tokens, and
+	// package tui deliberately knows nothing about a model.
 	interactive := !*noSplash && isTerminal(os.Stdout)
 	if interactive {
-		chosen, ok, err := tui.Start(checkpointDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
-			os.Exit(1)
-		}
-		if !ok {
-			return
-		}
-
-		// Coming through the splash lands on the chat screen — the picker just
-		// answered "what to run", and talking to it is the point. The
-		// checkpoint itself isn't loaded here: chosen.Name and chosen.Arch are
-		// already known from the catalog, so the chat screen's alt screen can
-		// open immediately and load in the background, rather than this
-		// blocking in plain terminal between the picker closing and the chat
-		// screen opening — which is what used to make picking a model look
-		// like the program had quit and started over.
-		label := chosen.Name
-		if err := runChatUI(chosen.Dir, label, *prompt, chosen.Arch); err != nil {
+		if err := tui.Start(checkpointDir, *prompt, chatEngine); err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}
@@ -271,6 +258,10 @@ func openTrace(path string, s *session, labels []string) (*trace.Writer, func(),
 // or has no weights in it. An empty dir is a deliberate choice — the picker uses
 // it for the built-in model — while a dir with nothing in it is the fresh-clone
 // case, and both end up in the same place.
+//
+// An empty prompt is also a deliberate choice, made by the chat screen's engine:
+// its prompts arrive one at a time off a channel, so there is nothing to encode
+// up front. Only the printed walkthrough has a prompt to run at load time.
 func setup(dir, prompt string) (*session, error) {
 	if dir == "" {
 		return setupDemo(prompt)
@@ -290,7 +281,7 @@ func setupReal(dir, prompt string) (*session, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading model: %w", err)
 	}
-	ids, err := encode(tok, prompt)
+	ids, err := encodeOptional(tok, prompt)
 	if err != nil {
 		return nil, err
 	}
@@ -323,12 +314,26 @@ func setupDemo(prompt string) (*session, error) {
 	if err != nil {
 		return nil, err
 	}
-	ids, err := encode(tok, prompt)
+	ids, err := encodeOptional(tok, prompt)
 	if err != nil {
 		return nil, err
 	}
 	return &session{gpt: gpt, tok: tok, ids: ids, prompt: prompt,
 		real: false, maxNewTokens: 12}, nil
+}
+
+// encodeOptional is encode for a session that may not have a prompt to run.
+//
+// The chat screen's engine is the caller with none: it loads a model so it can
+// answer whatever gets typed later, and there is nothing to tokenize at that
+// point. Without this, loading for a chat had to be handed some prompt, and the
+// round-trip check below would then fail the whole load over a string that
+// conversation was never going to run.
+func encodeOptional(tok *tokenizer.Tokenizer, prompt string) ([]int, error) {
+	if prompt == "" {
+		return nil, nil
+	}
+	return encode(tok, prompt)
 }
 
 // encode tokenizes and checks the result round-trips, which catches a

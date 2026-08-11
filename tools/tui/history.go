@@ -117,10 +117,10 @@ func (h *History) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.vp.GotoTop()
 	case "b", "backspace", "esc":
 		h.outcome = HistoryBack
-		return h, tea.Quit
+		return h, done
 	case "q", "ctrl+c":
 		h.outcome = HistoryQuit
-		return h, tea.Quit
+		return h, done
 	}
 	return h, nil
 }
@@ -137,7 +137,7 @@ func (h *History) updateViewing(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "q", "ctrl+c":
 		h.outcome = HistoryQuit
-		return h, tea.Quit
+		return h, done
 	default:
 		var cmd tea.Cmd
 		h.vp, cmd = h.vp.Update(msg)
@@ -175,7 +175,7 @@ func (h *History) updateStepping(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return h, nil
 	case "q", "ctrl+c":
 		h.outcome = HistoryQuit
-		return h, tea.Quit
+		return h, done
 	}
 	return h, nil
 }

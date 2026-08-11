@@ -219,3 +219,41 @@ func TestChatQuitKeys(t *testing.T) {
 		}
 	}
 }
+
+// The input box has to survive the layout arithmetic at every terminal size.
+//
+// It's the last thing in the body, and screen() clips the body from the bottom,
+// so any row the panel above it over-claims comes straight out of the input —
+// silently, and without changing the frame's width or its total row count. That
+// is exactly how it went missing once already: the viewport budget didn't
+// subtract the panel's own border, the panel rendered two rows over, and the
+// blank line and the input were the two rows that fell off. Checking that the
+// frame fits can't catch it, because a frame with no input still fits.
+func TestChatKeepsTheInputBox(t *testing.T) {
+	for _, size := range []tea.WindowSizeMsg{
+		{Width: 60, Height: 20},
+		{Width: 90, Height: 28},
+		{Width: 100, Height: 32},
+		{Width: 160, Height: 45},
+	} {
+		c, _, _ := newTestChat(t, "")
+		c.Update(size)
+		c.Update(ChatStatus(""))
+
+		if !strings.Contains(c.View(), c.input.Prompt) {
+			t.Errorf("at %dx%d: no input box on screen:\n%s", size.Width, size.Height, c.View())
+			continue
+		}
+
+		// And it has to still be there once there's a transcript pushing on the
+		// panel from the other side.
+		c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+		for range 40 {
+			c.Update(ChatToken("Paris and some more text to fill the viewport. "))
+		}
+		if !strings.Contains(c.View(), c.input.Prompt) {
+			t.Errorf("at %dx%d: input box lost once the transcript filled up:\n%s",
+				size.Width, size.Height, c.View())
+		}
+	}
+}

@@ -69,6 +69,22 @@ type ChatErr struct{ Err error }
 // token landing.
 type ChatStatus string
 
+// ChatOutcome is how the chat screen ended.
+//
+// It didn't used to have one: chat was the last screen of a chain of separate
+// programs, so the only way out of it was out of the program, and esc meant quit
+// here while it meant back on every screen before it. Now that every screen is
+// one model under one program, this screen has somewhere above it to return to.
+type ChatOutcome int
+
+const (
+	// ChatBack means they backed out to pick something else to run. The
+	// conversation is already saved — see save — so leaving costs nothing.
+	ChatBack ChatOutcome = iota
+	// ChatQuit means they left the program entirely.
+	ChatQuit
+)
+
 // chatPhase is what the screen is doing, which decides where a keystroke goes.
 type chatPhase int
 
@@ -101,9 +117,10 @@ type Chat struct {
 	events <-chan tea.Msg
 	reqs   chan<- string
 
-	phase  chatPhase
-	status string
-	err    error
+	phase   chatPhase
+	status  string
+	err     error
+	outcome ChatOutcome
 
 	turns []chatTurn
 
@@ -163,6 +180,9 @@ func NewChat(label string, arch Arch, events <-chan tea.Msg, reqs chan<- string,
 		startedAt: started,
 	}
 }
+
+// Outcome reports how the screen ended. Valid once it has finished.
+func (c *Chat) Outcome() ChatOutcome { return c.outcome }
 
 func (c *Chat) Init() tea.Cmd { return tea.Batch(waitForChat(c.events), chatSysTick()) }
 
@@ -263,8 +283,15 @@ func (c *Chat) turnRate() string {
 
 func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "ctrl+c", "esc":
-		return c, tea.Quit
+	case "ctrl+c":
+		c.outcome = ChatQuit
+		return c, done
+	case "esc":
+		// Back to the picker, the same thing esc does on every other screen —
+		// rather than out of the program, which is what it used to do here and
+		// what made a mistyped esc mid-conversation unrecoverable.
+		c.outcome = ChatBack
+		return c, done
 	case "enter":
 		return c, c.submit()
 	case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
@@ -483,7 +510,13 @@ func (c *Chat) layout() {
 	// so the text column inside the border and padding is inner-2-4. See
 	// picker.go's list/mem panels for the same arithmetic.
 	c.vp.Width = inner - 6
-	c.vp.Height = max(rows-2, 3) // less the blank line and input box below the panel
+	// rows is the room the panel and everything under it have to share. Four of
+	// those rows aren't viewport: the panel's own top and bottom border, then the
+	// blank line and the input below it. Counting only the last two let the panel
+	// render two rows taller than its budget, and since screen() clips the body
+	// from the bottom, the two rows it pushed off were the blank and the input —
+	// the chat screen lost its input box at every terminal size.
+	c.vp.Height = max(rows-4, 3)
 	c.refresh()
 }
 
@@ -530,7 +563,11 @@ func (c *Chat) infoBox(available int) string {
 	if c.err != nil {
 		rows = append(rows, "", warnStyle.Render(c.err.Error()))
 	}
-	return panelStyle.Width(min(infoBoxWidth, available)).Render(strings.Join(rows, "\n"))
+	// Less the border, which lipgloss draws outside the width it's given — the
+	// panel below does the same subtraction. Without it the box renders two
+	// cells wider than infoBoxWidth claims, and at a narrow terminal those two
+	// cells plus the screen margin put the frame over the edge.
+	return panelStyle.Width(min(infoBoxWidth, available) - 2).Render(strings.Join(rows, "\n"))
 }
 
 // memPhrase is "6.4GB free of 16.0GB", or "unknown" on a platform sysinfo
@@ -548,7 +585,8 @@ func (c *Chat) bar() string {
 	keys := []string{
 		keyStyle.Render("enter") + dimStyle.Render(" send"),
 		keyStyle.Render("↑↓") + dimStyle.Render(" scroll"),
-		keyStyle.Render("esc") + dimStyle.Render(" quit"),
+		keyStyle.Render("esc") + dimStyle.Render(" back"),
+		keyStyle.Render("ctrl+c") + dimStyle.Render(" quit"),
 	}
 	return toolbar(c.w, strings.Join(keys, dimStyle.Render(" · ")), dimStyle.Render(c.status))
 }

@@ -95,7 +95,11 @@ func ScanCheckpoint(dir string) Checkpoint {
 
 // Welcome is the bubbletea model for the splash screen.
 type Welcome struct {
-	sys          sysinfo.Info
+	sys sysinfo.Info
+	// dir is kept so reopen can re-scan it. The screen is reused rather than
+	// rebuilt every time it comes back into view, and what it found on disk the
+	// first time may not still be true.
+	dir          string
 	ckpt         Checkpoint
 	historyCount int // how many saved conversations to mention in the third box
 	choice       Choice
@@ -120,14 +124,29 @@ func NewWelcome(checkpointDir string) *Welcome {
 func NewWelcomeFor(sys sysinfo.Info, checkpointDir string) *Welcome {
 	return &Welcome{
 		sys:          sys,
+		dir:          checkpointDir,
 		ckpt:         ScanCheckpoint(checkpointDir),
 		historyCount: history.Count(),
 		w:            100, h: 32,
 	}
 }
 
-// Choice reports what the user picked. Valid once the program has returned.
+// Choice reports what the user picked. Valid once the screen has finished.
 func (w *Welcome) Choice() Choice { return w.choice }
+
+// reopen re-reads what the menu describes, for a screen that is about to be
+// shown again rather than built.
+//
+// Both numbers in it go stale the moment you leave: a conversation on the chat
+// screen adds one to the count the third box quotes, and weights downloaded
+// after reading the command in the first box turn "none found" into a model. The
+// choice is cleared too — it's what the root screen reads to decide where a
+// keypress leads, and a stale one is a decision nobody made.
+func (w *Welcome) reopen() {
+	w.ckpt = ScanCheckpoint(w.dir)
+	w.historyCount = history.Count()
+	w.choice = Quit
+}
 
 // Init starts the llama animating and names the terminal tab. Nothing else on
 // this screen moves, so if the art is never shown the ticks are wasted — but a
@@ -153,10 +172,10 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			w.cursor = min(w.cursor+1, len(menuItems)-1)
 		case "enter", " ":
 			w.choice = menuItems[w.cursor].choice
-			return w, tea.Quit
+			return w, done
 		case "q", "esc", "ctrl+c":
 			w.choice = Quit
-			return w, tea.Quit
+			return w, done
 		}
 	}
 	return w, nil

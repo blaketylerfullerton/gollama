@@ -75,10 +75,10 @@ func (a *About) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "b", "backspace", "esc":
 			a.outcome = AboutBack
-			return a, tea.Quit
+			return a, done
 		case "q", "ctrl+c":
 			a.outcome = AboutQuit
-			return a, tea.Quit
+			return a, done
 		default:
 			var cmd tea.Cmd
 			a.vp, cmd = a.vp.Update(msg)

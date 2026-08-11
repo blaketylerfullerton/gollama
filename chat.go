@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sort"
 
@@ -11,31 +12,6 @@ import (
 	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 	"github.com/blaketylerfullerton/GoLlama/tools/tui"
 )
-
-// runChatUI is the third screen: after the splash and the picker, a
-// conversation with whatever was chosen.
-//
-// It owns the one thing tui.Chat deliberately doesn't: what "generate" means.
-// The screen just streams strings and ranked lists; this function is where
-// those come from a real *model.GPT (or the random one) instead.
-//
-// label and arch come from the picker's own catalog entry rather than from
-// loading anything — chosen.Name and chosen.Arch are already known the moment
-// enter is pressed there. That's what lets this open the chat screen's alt
-// screen immediately: loading the checkpoint (a real multi-second read for the
-// 0.6B) happens inside chatEngine, after the screen is already up and showing
-// "loading…", instead of blocking in plain terminal between the picker closing
-// and the chat screen opening. Doing it the other way around is what used to
-// make picking a model look like the whole program had quit and relaunched.
-func runChatUI(dir, label, prompt string, arch tui.Arch) error {
-	events := make(chan tea.Msg)
-	reqs := make(chan string, 1)
-	go chatEngine(dir, prompt, reqs, events)
-
-	chat := tui.NewChat(label, arch, events, reqs, prompt)
-	_, err := tea.NewProgram(chat, tea.WithAltScreen()).Run()
-	return err
-}
 
 // chatMaxTokens caps a single reply. The real model is a scalar matmul in Go —
 // hundreds of milliseconds a token — so a reply has to stay short enough that
@@ -53,17 +29,32 @@ func chatMaxTokens(real bool) int {
 // show a list instead of the raw distribution.
 const chatCandidates = 4
 
-// chatEngine loads the checkpoint, then turns typed lines into generated
-// ones. It runs for the lifetime of the chat screen, holding one KV cache
-// across every turn: what you type second is a continuation of what the model
-// already said after the first, not a fresh prompt, so the cache has to carry
-// the whole conversation rather than restart it.
+// chatEngine is what the chat screen talks to: it loads the checkpoint, then
+// turns typed lines into generated ones. This is the one thing package tui
+// deliberately doesn't know how to do — the screen streams strings and ranked
+// lists, and this is where those come from a real *model.GPT (or the random
+// one) instead. It satisfies tui.Engine, and tui.Start is handed it by main.
 //
-// It also traces its own decode step, one token at a time, purely so the
-// inspect tab has something real to show: what a token attended to, and what
-// the model ranked as likely to follow it. That's the same instrumentation
-// cmd/inspect runs, just read out as two short lists instead of full matrices.
-func chatEngine(dir, prompt string, reqs <-chan string, out chan<- tea.Msg) {
+// It runs for the lifetime of one chat screen, holding one KV cache across every
+// turn: what you type second is a continuation of what the model already said
+// after the first, not a fresh prompt, so the cache has to carry the whole
+// conversation rather than restart it.
+//
+// The checkpoint is loaded in here rather than before the screen opens, and
+// that's deliberate: the picker already knows the model's name and shape from
+// its catalog, so chat can be on screen saying "loading…" while this does the
+// multi-second read behind it.
+//
+// ctx ends the whole thing. It's cancelled when the user leaves the chat screen,
+// which is what stops this goroutine holding a checkpoint resident for the rest
+// of the program's life — every model picked would otherwise leave one behind.
+//
+// It also traces its own decode step, one token at a time, purely so each turn
+// records what a token attended to and what the model ranked as likely to follow
+// it — the history screen steps back through that later. That's the same
+// instrumentation cmd/inspect runs, just read out as two short lists instead of
+// full matrices.
+func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- tea.Msg) {
 	defer close(out)
 
 	// No status is sent before the checkpoint is loaded: tui.Chat already opens
@@ -71,9 +62,15 @@ func chatEngine(dir, prompt string, reqs <-chan string, out chan<- tea.Msg) {
 	// that just repeats that same text — flips it straight to idle. Sending one
 	// here would let the input box accept a submission before the goroutine
 	// consuming reqs has even started running.
-	s, err := setup(dir, prompt)
+	//
+	// No prompt is passed: the -prompt flag is prefilled into the chat screen's
+	// input box for the user to send or edit, and it has nothing to do with
+	// getting a model into memory. Threading it through here meant a flag value
+	// that failed setup's round-trip check took the whole chat screen down with
+	// it, for a string this loop never ran.
+	s, err := setup(dir, "")
 	if err != nil {
-		out <- tui.ChatErr{Err: err}
+		emit(ctx, out, tui.ChatErr{Err: err})
 		return
 	}
 
@@ -87,10 +84,22 @@ func chatEngine(dir, prompt string, reqs <-chan string, out chan<- tea.Msg) {
 	// that was there. The cache itself only ever holds keys and values.
 	seq := make([]int, 0, 256)
 
-	out <- tui.ChatStatus("")
+	if !emit(ctx, out, tui.ChatStatus("")) {
+		return
+	}
 
 	var turn uint64
-	for text := range reqs {
+	for {
+		var text string
+		// Selected on rather than ranged over, so leaving the chat screen ends
+		// this goroutine even while it's sitting idle waiting for a prompt that
+		// is never going to arrive.
+		select {
+		case <-ctx.Done():
+			return
+		case text = <-reqs:
+		}
+
 		ids := s.tok.Encode(text)
 		if turn > 0 {
 			// Turns after the first are a continuation of the transcript, not
@@ -99,13 +108,17 @@ func chatEngine(dir, prompt string, reqs <-chan string, out chan<- tea.Msg) {
 			ids = append(s.tok.Encode("\n\n"), ids...)
 		}
 		if len(ids) == 0 {
-			out <- tui.ChatErr{Err: fmt.Errorf("that produced no tokens to run")}
+			if !emit(ctx, out, tui.ChatErr{Err: fmt.Errorf("that produced no tokens to run")}) {
+				return
+			}
 			continue
 		}
 
 		logits, err := s.gpt.ForwardCached(ids, cache)
 		if err != nil {
-			out <- tui.ChatErr{Err: err}
+			if !emit(ctx, out, tui.ChatErr{Err: err}) {
+				return
+			}
 			continue
 		}
 		seq = append(seq, ids...)
@@ -127,7 +140,9 @@ func chatEngine(dir, prompt string, reqs <-chan string, out chan<- tea.Msg) {
 				break
 			}
 			text := s.tok.DecodeSkipSpecial([]int{next})
-			out <- tui.ChatToken(text)
+			if !emit(ctx, out, tui.ChatToken(text)) {
+				return
+			}
 			seq = append(seq, next)
 
 			// Trace only this one decode pass — a single new token attending
@@ -140,13 +155,39 @@ func chatEngine(dir, prompt string, reqs <-chan string, out chan<- tea.Msg) {
 			if err != nil {
 				break
 			}
-			out <- chatStep(text, collector.Trace(), seq, logits, s.tok)
+			if !emit(ctx, out, chatStep(text, collector.Trace(), seq, logits, s.tok)) {
+				return
+			}
 		}
 		if err != nil {
-			out <- tui.ChatErr{Err: err}
+			if !emit(ctx, out, tui.ChatErr{Err: err}) {
+				return
+			}
 			continue
 		}
-		out <- tui.ChatDone{}
+		if !emit(ctx, out, tui.ChatDone{}) {
+			return
+		}
+	}
+}
+
+// emit hands one message to the chat screen, or gives up if the screen has gone
+// away.
+//
+// out is unbuffered, so a plain send with nobody left reading it blocks this
+// goroutine forever — and it would be holding a whole checkpoint resident while
+// it did. That is not hypothetical: leaving the chat screen mid-turn stops the
+// reader while this loop still has a reply's worth of tokens to hand over.
+//
+// It only ever bounds the leak to one token, not zero: the forward pass itself
+// isn't interruptible, so a cancelled context is noticed at the next token
+// boundary rather than during the matmul that's already running.
+func emit(ctx context.Context, out chan<- tea.Msg, msg tea.Msg) bool {
+	select {
+	case out <- msg:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

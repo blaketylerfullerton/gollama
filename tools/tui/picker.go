@@ -115,10 +115,10 @@ func (p *Picker) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return p, p.choose()
 		case "b", "backspace", "left", "esc":
 			p.outcome = Back
-			return p, tea.Quit
+			return p, done
 		case "q", "ctrl+c":
 			p.outcome = Cancelled
-			return p, tea.Quit
+			return p, done
 		}
 	}
 	return p, nil
@@ -176,7 +176,7 @@ func (p *Picker) choose() tea.Cmd {
 		return nil
 	}
 	p.outcome = Selected
-	return tea.Quit
+	return done
 }
 
 func (p *Picker) View() string {
@@ -574,13 +574,4 @@ func trunc(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
-}
-
-// ShowPicker runs the model-selection screen on its own alternate screen.
-func ShowPicker(root string, sys sysinfo.Info) (*Picker, error) {
-	p := NewPicker(root, sys)
-	if _, err := tea.NewProgram(p, tea.WithAltScreen()).Run(); err != nil {
-		return p, err
-	}
-	return p, nil
 }
