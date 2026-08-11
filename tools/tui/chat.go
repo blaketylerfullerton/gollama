@@ -370,7 +370,7 @@ func (c *Chat) ramGauge() string {
 	const width = 14
 	filled := min(int(frac*width+0.5), width)
 	bar := style.Render(strings.Repeat("█", filled)) +
-		amber.Fg(amber.Ash).Render(strings.Repeat("░", width-filled))
+		amber.NFg(amber.Rule).Render(strings.Repeat("░", width-filled))
 	return bar + "  " + dimStyle.Render(memPhrase(c.sys))
 }
 

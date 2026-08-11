@@ -256,7 +256,7 @@ func (w *Welcome) menu(width, rows int) string {
 		style := panelStyle.Width(boxWidth - 2)
 		title := "  " + dimStyle.Render(item.title)
 		if i == w.cursor {
-			style = style.BorderForeground(amber.At(amber.Hot))
+			style = style.BorderForeground(amber.At(amber.Accent))
 			title = selectedStyle.Render("▸ " + item.title)
 		}
 		body := lipgloss.JoinVertical(lipgloss.Left, title, "", item.detail(w))

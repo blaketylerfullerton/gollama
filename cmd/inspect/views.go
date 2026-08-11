@@ -10,24 +10,28 @@ import (
 	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
-// One hue, ten brightnesses, and brightness always means the same thing — see
-// tools/amber. This screen is where that rule earns its keep: the attention
-// matrix and the logit-lens bars are both coloured by calling amber.Of on the
-// number itself, so the chrome around them has to stay honest about its own
-// level or it would compete with the data for the eye.
+// This screen is where the two tracks earn their keep — see tools/amber. The
+// attention matrix and the logit-lens bars are coloured by calling amber.Of on
+// the number itself, and everything around them is grey, so the only saturated
+// thing in the frame is the data. That used to be untrue: the chrome was on the
+// same ramp, which meant a mid-level border and a mid-level attention weight
+// were the same colour and the eye had no way to tell the reading from the
+// furniture except by position.
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.At(amber.Void)).Background(amber.At(amber.Core))
-	dimStyle   = amber.Fg(amber.Faint)
-	keyStyle   = amber.Fg(amber.Live)
-	hotStyle   = amber.Fg(amber.Hot).Bold(true)
-	selStyle   = lipgloss.NewStyle().Bold(true).Foreground(amber.At(amber.Peak)).Background(amber.At(amber.Ember))
-	// A column heading is chrome, so it stays down at Faint and lets bold do
-	// the work of standing out. Brightening it would put it level with the
-	// numbers underneath it, and those are the point.
-	headerRowStyle = amber.Fg(amber.Faint).Bold(true)
-	tabStyle       = amber.Fg(amber.Faint)
-	activeTabStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.At(amber.Void)).Background(amber.At(amber.Core))
-	errStyle       = amber.Fg(amber.Peak).Bold(true)
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.N(0)).Background(amber.At(amber.Accent))
+	dimStyle   = amber.NFg(amber.Muted)
+	keyStyle   = amber.Fg(amber.Accent).Bold(true)
+	hotStyle   = amber.NFg(amber.Strong).Bold(true)
+	selStyle   = lipgloss.NewStyle().Bold(true).Foreground(amber.N(0)).Background(amber.At(amber.Accent))
+	// A column heading names the numbers under it and is not one of them, so it
+	// goes to the top of the furniture track. On the old shared ramp this had
+	// to be held down at a low level to avoid outshining the data; off the data
+	// track there is nothing to outshine, because grey makes no claim about
+	// magnitude however bright it gets.
+	headerRowStyle = amber.NFg(amber.Body).Bold(true)
+	tabStyle       = amber.NFg(amber.Muted)
+	activeTabStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.N(0)).Background(amber.At(amber.Accent))
+	errStyle       = lipgloss.NewStyle().Foreground(amber.Alert).Bold(true)
 )
 
 // --- logit lens -------------------------------------------------------------
@@ -231,7 +235,7 @@ func bar(frac float64, width int) string {
 	n := int(frac * float64(width))
 	n = max(0, min(width, n))
 	return lipgloss.NewStyle().Foreground(amber.Of(frac)).Render(strings.Repeat("█", n)) +
-		amber.Fg(amber.Ash).Render(strings.Repeat("░", width-n))
+		amber.NFg(amber.Rule).Render(strings.Repeat("░", width-n))
 }
 
 func floats(v []float32, n int) string {

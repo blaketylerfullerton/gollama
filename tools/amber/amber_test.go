@@ -1,6 +1,12 @@
 package amber
 
-import "testing"
+import (
+	"math"
+	"strconv"
+	"testing"
+
+	"github.com/charmbracelet/lipgloss"
+)
 
 // The package makes exactly one promise — a bigger number is never a darker
 // colour — and every screen that colours data by calling Of is relying on it.
@@ -48,5 +54,76 @@ func TestAtClamps(t *testing.T) {
 	}
 	if At(99) != Ramp[len(Ramp)-1] {
 		t.Error("At above the ramp should return the top")
+	}
+}
+
+// contrast is the WCAG ratio of a colour against a black terminal, which is the
+// worst case the palette has to survive.
+func contrast(t *testing.T, c lipgloss.Color) float64 {
+	t.Helper()
+	hex := string(c)
+	if len(hex) != 7 || hex[0] != '#' {
+		t.Fatalf("colour %q is not a #rrggbb literal", hex)
+	}
+	chan_ := func(i int) float64 {
+		v, err := strconv.ParseUint(hex[i:i+2], 16, 8)
+		if err != nil {
+			t.Fatalf("colour %q: %v", hex, err)
+		}
+		s := float64(v) / 255
+		if s <= 0.04045 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	l := 0.2126*chan_(1) + 0.7152*chan_(3) + 0.0722*chan_(5)
+	return (l + 0.05) / 0.05
+}
+
+// The furniture track's second promise, after "grey doesn't claim a magnitude",
+// is that anything named for text is actually legible. The levels below the
+// floor exist precisely because they aren't, so the split only stays honest if
+// something checks which side of it each name is on — this is the kind of thing
+// a plausible tweak to one hex value breaks silently, and silently is the whole
+// problem, since low-contrast grey looks fine to whoever picked it.
+func TestTextLevelsClearTheContrastFloor(t *testing.T) {
+	const floor = 4.5
+	for _, c := range []struct {
+		name  string
+		level int
+	}{
+		{"Muted", Muted},
+		{"Body", Body},
+		{"Strong", Strong},
+	} {
+		if got := contrast(t, N(c.level)); got < floor {
+			t.Errorf("Neutral %s (%s) is %.2f:1 on black, under the %.1f:1 body text needs",
+				c.name, N(c.level), got, floor)
+		}
+	}
+	if got := contrast(t, At(Accent)); got < floor {
+		t.Errorf("Accent (%s) is %.2f:1 on black, under %.1f:1 — it carries keys and the wordmark",
+			At(Accent), got, floor)
+	}
+	if got := contrast(t, Alert); got < floor {
+		t.Errorf("Alert (%s) is %.2f:1 on black, under %.1f:1", Alert, got, floor)
+	}
+}
+
+// The structural levels have to stay on the other side of the floor. A border
+// that creeps up into text contrast isn't a neutral bug — it's the flatness the
+// two tracks were introduced to fix, arriving one hex value at a time.
+func TestStructureLevelsStayBelowText(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		level int
+	}{
+		{"Edge", Edge},
+		{"Rule", Rule},
+	} {
+		if got := contrast(t, N(c.level)); got >= 4.5 {
+			t.Errorf("Neutral %s (%s) is %.2f:1 — bright enough to read, so it will compete with the text",
+				c.name, N(c.level), got)
+		}
 	}
 }

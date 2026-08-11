@@ -6,60 +6,70 @@ import (
 	"github.com/blaketylerfullerton/GoLlama/tools/amber"
 )
 
-// Every colour here is a level on the amber ramp, and the level is the only
-// thing being chosen — see tools/amber for why. cmd/inspect draws from the same
-// ramp at the same levels, so the two programs aren't just a matching palette:
-// a dim label means the same thing on this screen as a dim attention weight
-// does on that one.
+// Almost everything here is on the furniture track — see tools/amber. The hue
+// appears exactly three times on this screen: the title field, the wordmark,
+// and the keys you can press. That scarcity is the point. Everything else is
+// grey, which is what lets those three read as emphasis and what leaves the
+// data in cmd/inspect as the only saturated thing in its own frame.
 var (
 	// Reversed rather than coloured: the title is the brightest thing on the
 	// screen by area, so it takes the hue as a field and gives up the text.
 	titleStyle = lipgloss.NewStyle().Bold(true).
-			Foreground(amber.At(amber.Void)).Background(amber.At(amber.Core)).
+			Foreground(amber.N(0)).Background(amber.At(amber.Accent)).
 			Padding(0, 1)
 	// The wordmark takes the undiluted hue as ink rather than as a field: it's
 	// large enough that reversing it would put a block of solid colour a
 	// quarter the size of the screen behind two words.
-	wordmarkStyle = amber.Fg(amber.Core)
-	subtitleStyle = amber.Fg(amber.Faint).Italic(true)
-	dimStyle      = amber.Fg(amber.Faint)
-	labelStyle    = amber.Fg(amber.Faint).Width(11)
-	valueStyle    = amber.Fg(amber.Live)
-	// A section heading names the numbers under it; it isn't one of them, so it
-	// sits a step below the values it introduces and takes the undiluted hue
-	// plus bold instead of extra brightness. Pushing headings to the top of the
-	// ramp would make the labels outshine the data on every screen.
-	headingStyle = amber.Fg(amber.Core).Bold(true)
-	warnStyle    = amber.Fg(amber.Peak).Bold(true)
-	llamaStyle   = amber.Fg(amber.Core)
-	keyStyle     = amber.Fg(amber.Bright).Bold(true)
+	wordmarkStyle = amber.Fg(amber.Accent)
+	subtitleStyle = amber.NFg(amber.Muted).Italic(true)
+	dimStyle      = amber.NFg(amber.Muted)
+	labelStyle    = amber.NFg(amber.Muted).Width(11)
+	valueStyle    = amber.NFg(amber.Body)
+	// A heading outranks the values under it now, which is the opposite of how
+	// this read before. On the old single ramp a bright heading would have
+	// claimed to be a large number, so headings were held below their own
+	// content and bold was left to compensate. Off the data track that worry is
+	// gone: nothing about a grey heading suggests a magnitude, so it can simply
+	// be the loudest text in its section, which is what it is.
+	headingStyle = amber.NFg(amber.Strong).Bold(true)
+	warnStyle    = lipgloss.NewStyle().Foreground(amber.Alert).Bold(true)
+	llamaStyle   = amber.Fg(amber.Accent)
+	// Keys carry the hue and their descriptions don't, so a toolbar reads as a
+	// row of pressable things with grey annotations rather than as an
+	// undifferentiated strip of text.
+	keyStyle = amber.Fg(amber.Accent).Bold(true)
 
 	panelStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).BorderForeground(amber.At(amber.Ember)).
+			Border(lipgloss.RoundedBorder()).BorderForeground(amber.N(amber.Edge)).
 			Padding(0, 2)
 
 	// The toolbar takes the same border as the panels — it's part of the same
 	// frame — but a step dimmer. It says the same thing on every screen, so it
 	// shouldn't compete for attention with the numbers above it.
-	toolbarStyle = panelStyle.BorderForeground(amber.At(amber.Ash))
+	toolbarStyle = panelStyle.BorderForeground(amber.N(amber.Rule))
 )
 
 var (
-	// The two speakers in the transcript get the same treatment as any other
-	// label on screen: a step below the values they introduce. Colour is the
-	// only thing that tells "you" from "model" apart at a glance, so the two
-	// take opposite ends of the label range rather than sharing one.
-	youStyle        = amber.Fg(amber.Bright).Bold(true)
-	modelStyle      = amber.Fg(amber.Faint).Bold(true)
-	modelReplyStyle = amber.Fg(amber.Live)
+	// Colour is what tells "you" from "model" apart at a glance, and now the
+	// two speakers can differ by hue instead of by two steps of brightness:
+	// your turn is the accent, the model's is grey. That also matches who is
+	// acting — the accent marks the things you do everywhere else on screen.
+	youStyle        = amber.Fg(amber.Accent).Bold(true)
+	modelStyle      = amber.NFg(amber.Muted).Bold(true)
+	modelReplyStyle = amber.NFg(amber.Body)
 )
 
 var (
-	selectedStyle = amber.Fg(amber.Hot).Bold(true)
+	// The selected row is a field rather than bright ink. A row is wide enough
+	// to carry a background without shouting, and reversing it survives being
+	// surrounded by other text in a way that one more step of brightness on a
+	// list of already-bright rows does not.
+	selectedStyle = lipgloss.NewStyle().Bold(true).
+			Foreground(amber.N(0)).Background(amber.At(amber.Accent))
 
 	// The label column in the memory panel is narrower than the welcome
 	// screen's, since the panel beside it is what needs the room.
-	memLabelStyle = amber.Fg(amber.Faint).Width(13)
+	memLabelStyle = amber.NFg(amber.Muted).Width(13)
 )
 
 // The memory panel is a fixed width — it's columns of numbers, and reflowing

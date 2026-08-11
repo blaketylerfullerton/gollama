@@ -487,7 +487,7 @@ func (p *Picker) gauge(resident int64) string {
 	// empty bar still reads as a bar with nothing in it rather than as a full
 	// one that's been dimmed.
 	bar := style.Render(strings.Repeat("█", filled)) +
-		amber.Fg(amber.Ash).Render(strings.Repeat("░", width-filled))
+		amber.NFg(amber.Rule).Render(strings.Repeat("░", width-filled))
 
 	return bar + "\n" + style.Render(verdict)
 }
