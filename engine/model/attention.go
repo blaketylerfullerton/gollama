@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"math"
+	"sync"
 )
 
 // Attention is one grouped-query attention layer. Under GQA the q projection
@@ -130,29 +131,54 @@ func (a *Attention) Forward(x [][]float32, p *pass) ([][]float32, [][][]float32)
 	allWeights := make([][][]float32, a.NHead)
 
 	groupSize := a.NHead / a.NKVHead
-	for h := 0; h < a.NHead; h++ {
-		lo := h * a.HeadDim
-		kv := h / groupSize // which kv head this query head shares
+	tracing := p.tr.On()
 
-		qh := make([][]float32, T)
-		for t := 0; t < T; t++ {
-			pos := p.offset + t
-			normed := a.QNorm.ForwardVec(q[t][lo : lo+a.HeadDim])
-			qh[t] = ApplyRotary(normed, p.cos[pos], p.sin[pos])
-			// Report the last position: it has rotated the furthest, so the
-			// change is most visible there.
-			if t == T-1 {
-				p.tr.Rotary(h, normed, qh[t])
-			}
+	// Each query head is independent of the others (they only read q/store,
+	// never write shared state beyond their own slice of out/allWeights), so
+	// they run concurrently. Tracing forces the sequential path: p.tr.Rotary
+	// isn't safe to call from multiple goroutines at once.
+	if !tracing {
+		var wg sync.WaitGroup
+		wg.Add(a.NHead)
+		for h := 0; h < a.NHead; h++ {
+			go func(h int) {
+				defer wg.Done()
+				attentionHead(a, h, groupSize, q, store, p, T, out, allWeights, false)
+			}(h)
 		}
-
-		headOut, w := CausalAttention(qh, store.K[kv], store.V[kv], p.offset)
-		allWeights[h] = w
-		for t := 0; t < T; t++ {
-			copy(out[t][lo:lo+a.HeadDim], headOut[t])
+		wg.Wait()
+	} else {
+		for h := 0; h < a.NHead; h++ {
+			attentionHead(a, h, groupSize, q, store, p, T, out, allWeights, true)
 		}
 	}
 	return MatMul(out, a.Wo), allWeights
+}
+
+// attentionHead computes one query head's attention output and writes it into
+// its slice of out (and allWeights). Safe to call concurrently across
+// different h values as long as trace is false.
+func attentionHead(a *Attention, h, groupSize int, q [][]float32, store *LayerKV, p *pass, T int, out [][]float32, allWeights [][][]float32, trace bool) {
+	lo := h * a.HeadDim
+	kv := h / groupSize // which kv head this query head shares
+
+	qh := make([][]float32, T)
+	for t := 0; t < T; t++ {
+		pos := p.offset + t
+		normed := a.QNorm.ForwardVec(q[t][lo : lo+a.HeadDim])
+		qh[t] = ApplyRotary(normed, p.cos[pos], p.sin[pos])
+		// Report the last position: it has rotated the furthest, so the
+		// change is most visible there.
+		if trace && t == T-1 {
+			p.tr.Rotary(h, normed, qh[t])
+		}
+	}
+
+	headOut, w := CausalAttention(qh, store.K[kv], store.V[kv], p.offset)
+	allWeights[h] = w
+	for t := 0; t < T; t++ {
+		copy(out[t][lo:lo+a.HeadDim], headOut[t])
+	}
 }
 
 func NewRandomAttention(cfg GPTConfig) Attention {

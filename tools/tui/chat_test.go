@@ -6,11 +6,18 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/blaketylerfullerton/GoLlama/tools/history"
 )
 
 // newTestChat builds a chat screen with buffered channels sized so a test can
 // drive it without a goroutine on the other end pumping messages.
-func newTestChat(prompt string) (*Chat, chan tea.Msg, chan string) {
+//
+// It also redirects history.Save to a temp directory: a ChatDone in these
+// tests is a real save, and without this it would write conversations into
+// whatever machine happens to be running the suite.
+func newTestChat(t *testing.T, prompt string) (*Chat, chan tea.Msg, chan string) {
+	history.SetTestDir(t, t.TempDir())
 	events := make(chan tea.Msg, 8)
 	reqs := make(chan string, 1)
 	arch := known[0].Arch // Qwen3-0.6B's real shape, so the stats bar has real numbers to render
@@ -22,7 +29,7 @@ func newTestChat(prompt string) (*Chat, chan tea.Msg, chan string) {
 // Enter while the screen is still loading has nowhere to send a prompt — the
 // engine on the other end doesn't have a model loaded yet to run it on.
 func TestChatIgnoresSubmitWhileLoading(t *testing.T) {
-	c, _, reqs := newTestChat("hello")
+	c, _, reqs := newTestChat(t, "hello")
 	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	select {
 	case req := <-reqs:
@@ -34,7 +41,7 @@ func TestChatIgnoresSubmitWhileLoading(t *testing.T) {
 // Once the engine reports itself ready, enter on a non-empty box sends exactly
 // what was typed, and the screen stops accepting more until that turn ends.
 func TestChatSubmitSendsAndLocksInput(t *testing.T) {
-	c, _, reqs := newTestChat("hello there")
+	c, _, reqs := newTestChat(t, "hello there")
 	c.Update(ChatStatus(""))
 	if c.phase != chatIdle {
 		t.Fatalf("phase = %v after ChatStatus, want chatIdle", c.phase)
@@ -75,7 +82,7 @@ func TestChatSubmitSendsAndLocksInput(t *testing.T) {
 // a new one, and the transcript has to actually show them — that's the whole
 // point of streaming instead of waiting for ChatDone.
 func TestChatTokensAppendToTheOpenTurn(t *testing.T) {
-	c, _, _ := newTestChat("say hi")
+	c, _, _ := newTestChat(t, "say hi")
 	c.Update(ChatStatus(""))
 	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -98,7 +105,7 @@ func TestChatTokensAppendToTheOpenTurn(t *testing.T) {
 // after a forward pass errors partway through it — and it has to say why, or
 // the screen just looks stuck.
 func TestChatErrEndsTheTurnAndIsShown(t *testing.T) {
-	c, _, _ := newTestChat("hello")
+	c, _, _ := newTestChat(t, "hello")
 	c.Update(ChatStatus(""))
 	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
 
@@ -126,7 +133,7 @@ func TestChatFitsTheTerminal(t *testing.T) {
 		{Width: 100, Height: 32},
 		{Width: 160, Height: 45},
 	} {
-		c, _, _ := newTestChat("The capital of France is")
+		c, _, _ := newTestChat(t, "The capital of France is")
 		c.Update(size)
 		c.Update(ChatStatus(""))
 		c.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -148,7 +155,7 @@ func TestChatFitsTheTerminal(t *testing.T) {
 // to survive the round trip onto that screen — otherwise the inspect tab is
 // just an empty box with a label on it.
 func TestChatTabShowsSteps(t *testing.T) {
-	c, _, _ := newTestChat("hello")
+	c, _, _ := newTestChat(t, "hello")
 	c.Update(ChatStatus(""))
 	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	c.Update(ChatStep{
@@ -177,7 +184,7 @@ func TestChatTabShowsSteps(t *testing.T) {
 // there's nothing to type into, so a stray keystroke there must not silently
 // land in a text box the reader can no longer see.
 func TestChatInputIsInertOnInspectTab(t *testing.T) {
-	c, _, _ := newTestChat("")
+	c, _, _ := newTestChat(t, "")
 	c.Update(ChatStatus(""))
 	c.Update(tea.KeyMsg{Type: tea.KeyTab})
 	c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("hi")})
@@ -189,7 +196,7 @@ func TestChatInputIsInertOnInspectTab(t *testing.T) {
 // The stats line has real numbers in it whatever the terminal width, and it
 // must never be the widest thing on screen — see the width guard in stats().
 func TestChatStatsFitsNarrowTerminal(t *testing.T) {
-	c, _, _ := newTestChat("hello")
+	c, _, _ := newTestChat(t, "hello")
 	c.Update(tea.WindowSizeMsg{Width: 50, Height: 20})
 	for _, line := range strings.Split(c.View(), "\n") {
 		if got := lipgloss.Width(line); got > 50 {
@@ -205,7 +212,7 @@ func TestChatQuitKeys(t *testing.T) {
 		{Type: tea.KeyCtrlC},
 		{Type: tea.KeyEsc},
 	} {
-		c, _, _ := newTestChat("hello")
+		c, _, _ := newTestChat(t, "hello")
 		_, cmd := c.Update(key)
 		if cmd == nil {
 			t.Errorf("%v did not quit the screen", key)

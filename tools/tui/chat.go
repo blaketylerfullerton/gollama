@@ -10,6 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/blaketylerfullerton/GoLlama/tools/amber"
+	"github.com/blaketylerfullerton/GoLlama/tools/history"
 	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
 )
 
@@ -120,6 +122,9 @@ type Chat struct {
 	turnTokens   int
 	lastTurnRate string // "12 tok in 4.1s (2.9 tok/s)", frozen once a turn ends
 
+	sessionID string    // names this conversation's file under history.Save
+	startedAt time.Time
+
 	sys sysinfo.Info
 
 	input textinput.Model
@@ -154,16 +159,19 @@ func NewChat(label string, arch Arch, events <-chan tea.Msg, reqs chan<- string,
 	in.Prompt = "❯ "
 	in.Focus()
 
+	started := time.Now()
 	return &Chat{
-		label:  label,
-		arch:   arch,
-		events: events,
-		reqs:   reqs,
-		phase:  chatLoading,
-		status: "loading…",
-		sys:    sysinfo.Detect(),
-		input:  in,
-		vp:     viewport.New(0, 0),
+		label:     label,
+		arch:      arch,
+		events:    events,
+		reqs:      reqs,
+		phase:     chatLoading,
+		status:    "loading…",
+		sys:       sysinfo.Detect(),
+		input:     in,
+		vp:        viewport.New(0, 0),
+		sessionID: history.NewID(started),
+		startedAt: started,
 	}
 }
 
@@ -201,6 +209,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case chatSysTickMsg:
 		c.sys = sysinfo.Detect()
+		c.setContent() // stats may have changed; don't yank the scroll position to do it
 		return c, chatSysTick()
 
 	case ChatStatus:
@@ -208,6 +217,7 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if c.phase == chatLoading {
 			c.phase = chatIdle
 		}
+		c.refresh()
 		return c, waitForChat(c.events)
 
 	case ChatToken:
@@ -230,10 +240,13 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		c.phase, c.status = chatIdle, ""
 		c.lastTurnRate = c.turnRate()
 		c.input.Focus()
+		c.refresh()
+		c.save()
 		return c, waitForChat(c.events)
 
 	case ChatErr:
 		c.err, c.phase, c.status = msg.Err, chatIdle, ""
+		c.refresh()
 		return c, waitForChat(c.events)
 
 	case tea.KeyMsg:
@@ -303,12 +316,107 @@ func (c *Chat) submit() tea.Cmd {
 // the bottom, so a token landing mid-scroll doesn't leave the reader stranded
 // above it.
 func (c *Chat) refresh() {
-	if c.tab == tabInspect {
-		c.vp.SetContent(c.inspect())
-	} else {
-		c.vp.SetContent(c.transcript())
-	}
+	c.setContent()
 	c.vp.GotoBottom()
+}
+
+// setContent re-renders whichever tab is showing into the viewport without
+// touching scroll position — for updates like the RAM gauge ticking over that
+// change what's on screen but aren't new conversation to follow to the bottom
+// of.
+func (c *Chat) setContent() {
+	var content string
+	if c.tab == tabInspect {
+		content = c.inspect()
+	} else {
+		content = c.transcript()
+	}
+	c.vp.SetContent(c.anchorBottom(content, c.vp.Height))
+}
+
+// anchorBottom pads content with leading blank lines so short conversations
+// sit against the bottom of the panel, next to the input box, the way Claude
+// Code's transcript hugs the prompt instead of floating at the top of an
+// otherwise empty pane. Once content fills the panel this is a no-op — the
+// padding only ever fills the gap, never trims anything.
+//
+// When the gap is big enough to hold something, it holds the session stats
+// instead of going to waste — the same numbers the toolbar shows, just given
+// room to be read rather than squeezed onto one line.
+func (c *Chat) anchorBottom(content string, height int) string {
+	pad := height - lipgloss.Height(content)
+	if pad <= 0 {
+		return content
+	}
+	stats := c.sessionStats()
+	if statH := lipgloss.Height(stats); pad >= statH+1 {
+		above := pad - statH
+		return strings.Repeat("\n", above/2) + stats + strings.Repeat("\n", pad-above/2-statH) + content
+	}
+	return strings.Repeat("\n", pad) + content
+}
+
+// sessionStats is the block shown in the empty space above a short
+// conversation: the same "is this still fine" numbers as the stats line, plus
+// a RAM gauge and the current stage, laid out with room to breathe since
+// there's nothing else competing for that space yet.
+func (c *Chat) sessionStats() string {
+	rows := []string{
+		heading("session"),
+		"",
+		c.ramGauge(),
+		row("resident", "~"+sysinfo.Bytes(c.arch.ResidentBytes())),
+		row("stage", c.stageLabel()),
+	}
+	if rate := c.tpsLabel(); rate != "" {
+		rows = append(rows, row("tok/s", rate))
+	}
+	return lipgloss.NewStyle().Align(lipgloss.Center).Render(strings.Join(rows, "\n"))
+}
+
+// stageLabel names what the engine is doing right now, in the same words the
+// toolbar's status line would use — loading, idle, or mid-turn.
+func (c *Chat) stageLabel() string {
+	switch c.phase {
+	case chatLoading:
+		return "loading"
+	case chatGenerating:
+		return "generating"
+	default:
+		return "idle"
+	}
+}
+
+// tpsLabel is the live rate while a turn is in flight, or the last completed
+// turn's rate once it's settled — never both, since only one is ever the
+// current answer to "how fast is this going".
+func (c *Chat) tpsLabel() string {
+	if c.phase == chatGenerating && c.turnTokens > 0 {
+		rate := float64(c.turnTokens) / time.Since(c.turnStarted).Seconds()
+		return fmt.Sprintf("%.1f", rate)
+	}
+	if c.lastTurnRate != "" {
+		return c.lastTurnRate
+	}
+	return ""
+}
+
+// ramGauge is a compact bar of used-vs-total memory, the same colour-by-
+// fraction bar the picker draws before a model is even loaded — brighter as
+// it fills, no legend needed.
+func (c *Chat) ramGauge() string {
+	if c.sys.MemoryBytes == 0 {
+		return dimStyle.Render("ram unknown")
+	}
+	used := c.sys.MemoryBytes - c.sys.AvailableBytes
+	frac := float64(used) / float64(c.sys.MemoryBytes)
+	style := lipgloss.NewStyle().Foreground(amber.Of(frac))
+
+	const width = 20
+	filled := min(int(frac*width+0.5), width)
+	bar := style.Render(strings.Repeat("█", filled)) +
+		amber.Fg(amber.Ash).Render(strings.Repeat("░", width-filled))
+	return bar + "  " + dimStyle.Render(memPhrase(c.sys))
 }
 
 func (c *Chat) transcript() string {
@@ -318,14 +426,40 @@ func (c *Chat) transcript() string {
 	}
 	blocks := make([]string, len(c.turns))
 	for i, t := range c.turns {
-		you := youStyle.Render("you") + "  " + valueStyle.Render(t.you)
-		reply := modelReplyStyle.Render(t.model)
+		reply := t.model
 		if reply == "" && i == len(c.turns)-1 && c.phase == chatGenerating {
-			reply = dimStyle.Render("…")
+			blocks[i] = renderTurn(t.you, "") + dimStyle.Render("…")
+			continue
 		}
-		blocks[i] = you + "\n" + modelStyle.Render("model") + "  " + reply
+		blocks[i] = renderTurn(t.you, reply)
 	}
 	return strings.Join(blocks, "\n\n")
+}
+
+// renderTurn is one you/model exchange, styled the same way whether it's
+// live in the chat tab or read back from history.Save later — a saved
+// conversation should look like the one that produced it.
+func renderTurn(you, model string) string {
+	return youStyle.Render("you") + "  " + valueStyle.Render(you) + "\n" +
+		modelStyle.Render("model") + "  " + modelReplyStyle.Render(model)
+}
+
+// save persists the conversation so far. It's called once per completed
+// turn rather than once at the end, so a conversation that's still open when
+// the program exits (or crashes) isn't lost — only whatever turn was still
+// in flight is. Failures are silent: history is a convenience, not something
+// worth interrupting a chat over.
+func (c *Chat) save() {
+	if len(c.turns) == 0 {
+		return
+	}
+	turns := make([]history.Entry, len(c.turns))
+	for i, t := range c.turns {
+		turns[i] = history.Entry{You: t.you, Model: t.model}
+	}
+	_ = history.Save(history.Conversation{
+		ID: c.sessionID, Label: c.label, StartedAt: c.startedAt, Turns: turns,
+	})
 }
 
 // inspect is the second tab: one block per recent token, each with the two

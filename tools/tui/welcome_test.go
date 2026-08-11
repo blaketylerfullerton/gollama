@@ -139,9 +139,9 @@ func TestWelcomeOpensOnSelectAModel(t *testing.T) {
 // page, not fall through to Run — the whole point of the row.
 func TestWelcomeSelectsAbout(t *testing.T) {
 	w := NewWelcome(t.TempDir())
-	w.Update(key("down"))
+	w.Update(key("right"))
 	if w.cursor != 1 {
-		t.Fatalf("cursor = %d after down, want 1", w.cursor)
+		t.Fatalf("cursor = %d after right, want 1", w.cursor)
 	}
 	_, cmd := w.Update(key("enter"))
 	if cmd == nil {
@@ -156,15 +156,15 @@ func TestWelcomeSelectsAbout(t *testing.T) {
 // many past either end should not silently jump to the other end.
 func TestWelcomeCursorDoesNotWrap(t *testing.T) {
 	w := NewWelcome(t.TempDir())
-	w.Update(key("k")) // already at the top
+	w.Update(key("h")) // already at the left
 	if w.cursor != 0 {
-		t.Errorf("cursor = %d after up from the top, want 0", w.cursor)
+		t.Errorf("cursor = %d after left from the start, want 0", w.cursor)
 	}
 	for range len(menuItems) + 3 {
-		w.Update(key("j"))
+		w.Update(key("l"))
 	}
 	if want := len(menuItems) - 1; w.cursor != want {
-		t.Errorf("cursor = %d after running off the bottom, want %d", w.cursor, want)
+		t.Errorf("cursor = %d after running off the right, want %d", w.cursor, want)
 	}
 }
 
@@ -179,9 +179,9 @@ func TestWelcomeShowsBothMenuRows(t *testing.T) {
 		}
 	}
 
-	w.Update(key("down"))
+	w.Update(key("right"))
 	view = w.View()
-	if !strings.Contains(view, "enter") || !strings.Contains(view, "read the rest") {
+	if !strings.Contains(view, "What is GoLlama") || !strings.Contains(view, "GoLlama is a") {
 		t.Error("highlighting \"what is GoLlama\" did not show its teaser")
 	}
 }

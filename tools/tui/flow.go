@@ -41,6 +41,16 @@ func Start(checkpointDir string) (Model, bool, error) {
 			}
 			continue // AboutBack: reopen the menu
 
+		case ShowHistory:
+			h := NewHistory()
+			if _, err := tea.NewProgram(h, tea.WithAltScreen()).Run(); err != nil {
+				return Model{}, false, err
+			}
+			if h.Outcome() == HistoryQuit {
+				return Model{}, false, nil
+			}
+			continue // HistoryBack: reopen the menu
+
 		case Run:
 			p := NewPicker(root, sys)
 			if _, err := tea.NewProgram(p, tea.WithAltScreen()).Run(); err != nil {

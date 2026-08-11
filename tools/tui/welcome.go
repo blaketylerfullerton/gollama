@@ -20,6 +20,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/blaketylerfullerton/GoLlama/tools/amber"
+	"github.com/blaketylerfullerton/GoLlama/tools/history"
 	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
 )
 
@@ -35,12 +37,16 @@ const (
 	// ShowAbout means they picked "what is GoLlama" — go read the about page,
 	// then come back to this menu.
 	ShowAbout
+	// ShowHistory means they picked "past conversations" — go read saved
+	// chats, then come back to this menu.
+	ShowHistory
 )
 
-// menuItem is one row of the start menu: what it's called, and the detail
-// panel shown while it's highlighted.
+// menuItem is one box of the start menu: what it's called, what picking it
+// leads to, and the detail panel shown while it's highlighted.
 type menuItem struct {
-	title string
+	title  string
+	choice Choice
 	// detail renders the content panel for this item. It's a func rather than
 	// a precomputed string because the machine specs need the terminal width
 	// to wrap the download command, and that isn't known until View runs.
@@ -48,8 +54,9 @@ type menuItem struct {
 }
 
 var menuItems = []menuItem{
-	{title: "select a model", detail: (*Welcome).specs},
-	{title: "what is GoLlama", detail: (*Welcome).aboutBlurb},
+	{title: "select a model", choice: Run, detail: (*Welcome).weightsBlurb},
+	{title: "what is GoLlama", choice: ShowAbout, detail: (*Welcome).aboutBlurb},
+	{title: "past conversations", choice: ShowHistory, detail: (*Welcome).historyBlurb},
 }
 
 // Checkpoint is what we found on disk where the weights are meant to be. It's
@@ -88,11 +95,12 @@ func ScanCheckpoint(dir string) Checkpoint {
 
 // Welcome is the bubbletea model for the splash screen.
 type Welcome struct {
-	sys    sysinfo.Info
-	ckpt   Checkpoint
-	choice Choice
-	cursor int // which menuItems row is highlighted
-	w, h   int
+	sys          sysinfo.Info
+	ckpt         Checkpoint
+	historyCount int // how many saved conversations to mention in the third box
+	choice       Choice
+	cursor       int // which menuItems row is highlighted
+	w, h         int
 	// tick counts animation frames rather than storing one, so the llama's two
 	// motions can be derived from it independently. See llamaFrameAt.
 	tick int
@@ -111,20 +119,24 @@ func NewWelcome(checkpointDir string) *Welcome {
 // once per screen.
 func NewWelcomeFor(sys sysinfo.Info, checkpointDir string) *Welcome {
 	return &Welcome{
-		sys:  sys,
-		ckpt: ScanCheckpoint(checkpointDir),
-		w:    100, h: 32,
+		sys:          sys,
+		ckpt:         ScanCheckpoint(checkpointDir),
+		historyCount: history.Count(),
+		w:            100, h: 32,
 	}
 }
 
 // Choice reports what the user picked. Valid once the program has returned.
 func (w *Welcome) Choice() Choice { return w.choice }
 
-// Init starts the llama animating. Nothing else on this screen moves, so if the
-// art is never shown the ticks are wasted — but a timer at llamaInterval costs
-// less than deciding per frame whether it's needed, and View is the only thing
-// that knows the terminal is too narrow for the art.
-func (w *Welcome) Init() tea.Cmd { return llamaTick() }
+// Init starts the llama animating and names the terminal tab. Nothing else on
+// this screen moves, so if the art is never shown the ticks are wasted — but a
+// timer at llamaInterval costs less than deciding per frame whether it's
+// needed, and View is the only thing that knows the terminal is too narrow for
+// the art.
+func (w *Welcome) Init() tea.Cmd {
+	return tea.Batch(tea.SetWindowTitle("🦙 GoLlama"), llamaTick())
+}
 
 func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -135,16 +147,12 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, llamaTick()
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "up", "k":
+		case "left", "h":
 			w.cursor = max(w.cursor-1, 0)
-		case "down", "j":
+		case "right", "l":
 			w.cursor = min(w.cursor+1, len(menuItems)-1)
 		case "enter", " ":
-			if w.cursor == 0 {
-				w.choice = Run
-			} else {
-				w.choice = ShowAbout
-			}
+			w.choice = menuItems[w.cursor].choice
 			return w, tea.Quit
 		case "q", "esc", "ctrl+c":
 			w.choice = Quit
@@ -160,6 +168,23 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 const minSpecsWidth = 48
 
 const subtitle = "a transformer you can read, one token at a time"
+
+// menuChrome is a box's padding (4) plus border (2), the same convention
+// panelChrome uses elsewhere — see style.go.
+const menuChrome = 6
+
+// menuMinWidth is the narrowest the menu can be drawn without wrapping a
+// title onto a second line: each box wide enough for its own title plus
+// chrome, side by side with a gap between each pair.
+func menuMinWidth() int {
+	const gap = 2
+	longest := 0
+	for _, item := range menuItems {
+		longest = max(longest, len(item.title)+2) // +2 for the "▸ " cursor
+	}
+	n := len(menuItems)
+	return n*(longest+menuChrome) + (n-1)*gap
+}
 
 func (w *Welcome) View() string {
 	bar := w.bar()
@@ -198,37 +223,86 @@ func (w *Welcome) View() string {
 // reads as page furniture.
 func (w *Welcome) column(width, rows int) string {
 	head := hero("GoLlama", subtitle, width)
-	menu := w.menu()
+	machine := stretch(panelStyle.Width(width-2), 0, w.machineSpecs())
+	// Whatever's left after the title and the machine panel goes to the menu
+	// boxes, so the column still reaches the bottom of the screen.
+	menu := w.menu(width, rows-lipgloss.Height(head)-lipgloss.Height(machine)-2)
 	return lipgloss.JoinVertical(lipgloss.Left,
 		head,
 		"",
-		menu,
+		machine,
 		"",
-		// Minus the title, the menu, and the blank lines around them, so the
-		// box ends where the body does.
-		stretch(panelStyle.Width(width-2),
-			rows-lipgloss.Height(head)-lipgloss.Height(menu)-2,
-			menuItems[w.cursor].detail(w)))
+		menu)
 }
 
-// menu is the two-row start menu: what you can do from here, with the
-// highlighted row pointing at the panel underneath it the same way the
-// picker's cursor points at the memory column.
-func (w *Welcome) menu() string {
-	rows := make([]string, len(menuItems))
+// menu is the side-by-side option boxes underneath the machine panel: what you
+// can do from here, toggled left/right, with the highlighted box picked out
+// the same way the picker's cursor points at the memory column.
+//
+// Below menuMinWidth there isn't room for every title on one line without
+// wrapping, so it falls back to a single-line title strip over one detail
+// panel — the same shape the two-item menu used before there were three of
+// them to fit, kept for whatever terminal is too narrow for the boxes.
+func (w *Welcome) menu(width, rows int) string {
+	if width < menuMinWidth() {
+		return w.menuStacked(width, rows)
+	}
+	// n boxes with a gap between each pair, splitting whatever's left evenly.
+	const gap = 2
+	n := len(menuItems)
+	boxWidth := (width - gap*(n-1)) / n
+	boxes := make([]string, n)
+	for i, item := range menuItems {
+		style := panelStyle.Width(boxWidth - 2)
+		title := "  " + dimStyle.Render(item.title)
+		if i == w.cursor {
+			style = style.BorderForeground(amber.At(amber.Hot))
+			title = selectedStyle.Render("▸ " + item.title)
+		}
+		body := lipgloss.JoinVertical(lipgloss.Left, title, "", item.detail(w))
+		boxes[i] = stretch(style, rows, body)
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, joinWithGaps(boxes, gap)...)
+}
+
+// menuStacked is the narrow-terminal fallback: one title per line rather than
+// a row of them, since a terminal too narrow for the boxes side by side is
+// also too narrow for their titles side by side in a strip. The highlighted
+// one's detail goes underneath in a single panel that takes the full width
+// instead of a third of it.
+func (w *Welcome) menuStacked(width, rows int) string {
+	titles := make([]string, len(menuItems))
 	for i, item := range menuItems {
 		if i == w.cursor {
-			rows[i] = selectedStyle.Render("▸ " + item.title)
+			titles[i] = selectedStyle.Render("▸ " + item.title)
 			continue
 		}
-		rows[i] = "  " + dimStyle.Render(item.title)
+		titles[i] = "  " + dimStyle.Render(item.title)
 	}
-	return strings.Join(rows, "\n")
+	list := strings.Join(titles, "\n")
+	panel := stretch(panelStyle.Width(width-2), rows-lipgloss.Height(list)-1,
+		menuItems[w.cursor].detail(w))
+	return lipgloss.JoinVertical(lipgloss.Left, list, "", panel)
 }
 
-// specs is the right-hand column: what this machine is, then what's on disk to
-// run on it.
-func (w *Welcome) specs() string {
+// joinWithGaps interleaves a fixed-width blank column between each element,
+// for lipgloss.JoinHorizontal calls over a slice whose length isn't fixed at
+// two.
+func joinWithGaps(boxes []string, gap int) []string {
+	out := make([]string, 0, 2*len(boxes)-1)
+	for i, b := range boxes {
+		if i > 0 {
+			out = append(out, strings.Repeat(" ", gap))
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// machineSpecs is the always-visible panel above the menu: what this machine
+// is, so the two options below it can be judged against real hardware rather
+// than in the abstract.
+func (w *Welcome) machineSpecs() string {
 	s := w.sys
 	rows := []string{
 		heading("This machine"),
@@ -251,10 +325,14 @@ func (w *Welcome) specs() string {
 		memory,
 		row("platform", s.Platform()),
 		row("runtime", fmt.Sprintf("%s · GOMAXPROCS %d", s.GoVersion, s.GOMAXPROCS)),
-		"",
-		heading("Weights"),
 	)
-	rows = append(rows, w.checkpointRows()...)
+	return strings.Join(rows, "\n")
+}
+
+// weightsBlurb is the detail panel for the menu's first box: what's on disk to
+// run on this machine.
+func (w *Welcome) weightsBlurb() string {
+	rows := append([]string{heading("Weights")}, w.checkpointRows()...)
 	return strings.Join(rows, "\n")
 }
 
@@ -301,11 +379,37 @@ func (w *Welcome) aboutBlurb() string {
 	return strings.Join(rows, "\n")
 }
 
+// historyBlurb is the detail panel for the menu's third box: how many
+// conversations there are to read back, not their contents — that's what the
+// history page itself is for.
+func (w *Welcome) historyBlurb() string {
+	if w.historyCount == 0 {
+		return strings.Join([]string{
+			heading("Past conversations"),
+			"",
+			dimStyle.Render("Nothing saved yet. Every conversation on the chat screen is written"),
+			dimStyle.Render("here as it happens, so it's still here next time you open GoLlama."),
+		}, "\n")
+	}
+	plural := "s"
+	if w.historyCount == 1 {
+		plural = ""
+	}
+	return strings.Join([]string{
+		heading("Past conversations"),
+		"",
+		fmt.Sprintf("%s saved conversation%s", valueStyle.Render(fmt.Sprint(w.historyCount)), plural),
+		"",
+		valueStyle.Render("enter") + dimStyle.Render(" to read back what was said, without"),
+		dimStyle.Render("reloading the model or the engine behind it."),
+	}, "\n")
+}
+
 // bar is the toolbar along the bottom: the keys this screen answers to on the
 // left, and the other way into the program on the right.
 func (w *Welcome) bar() string {
 	keys := []string{
-		keyStyle.Render("↑↓") + dimStyle.Render(" choose"),
+		keyStyle.Render("←→") + dimStyle.Render(" choose"),
 		keyStyle.Render("enter") + dimStyle.Render(" select"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}
