@@ -14,11 +14,35 @@ import (
 	"time"
 )
 
-// Entry is one exchange: what was typed, and however much of the model's
-// reply had landed by the time the conversation was saved.
+// Candidate is one entry in a ranked list — a token and a weight, meaning
+// either "probability of being next" or "share of attention" depending on
+// which list it's in. Same shape as tui.ChatCandidate, duplicated here rather
+// than imported so this package still has no dependency on the terminal UI —
+// only the UI depends on the storage, never the other way around.
+type Candidate struct {
+	Text string  `json:"text"`
+	Prob float64 `json:"prob"`
+}
+
+// Step is one generated token, with what it leaned on and what it ranked as
+// likely to come next — the same instrumentation the chat screen's inspect
+// tab shows live, kept here so a rewatch can show it too instead of just the
+// flat reply text.
+type Step struct {
+	Token      string      `json:"token"`
+	Attention  []Candidate `json:"attention,omitempty"`
+	Candidates []Candidate `json:"candidates,omitempty"`
+}
+
+// Entry is one exchange: what was typed, the reply, and enough about how it
+// was produced — how long it took, how many tokens, and each one's step — to
+// play the turn back rather than just read it.
 type Entry struct {
-	You   string `json:"you"`
-	Model string `json:"model"`
+	You     string        `json:"you"`
+	Model   string        `json:"model"`
+	Tokens  int           `json:"tokens,omitempty"`
+	Elapsed time.Duration `json:"elapsed,omitempty"` // nanoseconds; time.Duration's default JSON encoding
+	Steps   []Step        `json:"steps,omitempty"`
 }
 
 // Conversation is everything needed to show a past session again: who it was

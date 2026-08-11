@@ -44,7 +44,7 @@ You get a welcome screen first — the llama on the left, the machine you're abo
  ↑↓ choose · enter select · q quit
 ```
 
-Hardware detection is in `tools/sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else. "select a model" leads to the picker; "what is GoLlama" leads to a short about page — both come back here rather than exiting through it.
+Hardware detection is in `tools/sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else. The menu has three entries: "select a model" leads to the picker; "what is GoLlama" leads to a short about page; "past conversations" opens a read-only browser over every chat that's been saved to disk. All three come back here rather than exiting through it.
 
 The picker is where the memory arithmetic that actually matters happens: every model this repo knows about, what it costs on disk versus resident in RAM once bf16 is widened to float32, and a verdict — recommended, fits, or too large — against whatever this machine has free right now:
 
@@ -68,7 +68,7 @@ The picker is where the memory arithmetic that actually matters happens: every m
  ╰──────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
 ```
 
-Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation `cmd/inspect` uses, read out as two short ranked lists next to a live conversation instead of full matrices.
+Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation `cmd/inspect` uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" from the welcome menu lets you reopen and replay any of them later without reloading a model.
 
 With a checkpoint in `checkpoints/qwen3-0.6b` this is the real 0.6B model; a fresh clone with nothing downloaded yet still has the built-in "tiny random model" entry, so every screen works before you fetch any weights. To get the real ones:
 
@@ -371,11 +371,10 @@ BenchmarkRealForward-10    2    2390730896 ns/op   uncached, 5 tokens
 BenchmarkRealDecode-10     2     483599854 ns/op   one cached decode step
 ```
 
-484ms per token is still ~1.5 tokens/sec, which is bad. The remaining problem is arithmetic throughput, not algorithms — roughly 2.5 GFLOP/s, maybe 10× off what a tuned single-threaded loop should manage. Next in order of payoff:
+484ms per token is still ~1.5 tokens/sec, which is bad. `MatMul` (in [linear.go](engine/model/linear.go)) and `Attention.Forward` (in [attention.go](engine/model/attention.go)) already parallelize across output columns and across heads respectively via goroutines — the numbers above are with that in place — so the remaining problem is arithmetic throughput, not missing parallelism: roughly 2.5 GFLOP/s per core, maybe 10× off what a tuned single-threaded loop should manage. Next in order of payoff:
 
 1. **Flat `[]float32` with explicit strides** instead of `[][]float32`, which is a pointer chase per row.
-2. **Parallel matmul** across output rows.
-3. **Quantized weights**, so bfloat16 stops being widened to float32 on load.
+2. **Quantized weights**, so bfloat16 stops being widened to float32 on load.
 
 ## Not implemented yet
 
@@ -435,11 +434,17 @@ tools/
                      installed under a checkpoint root
     chat.go          screen 3: the conversation, plus the inspect tab
     about.go         the "what is GoLlama" page
+    history.go       screen: "past conversations" — read-only playback of
+                     whatever tools/history has saved
     layout.go        the frame both screens share: header, toolbar, panels
     llama.go         the animated ASCII llama
     wordmark.go      the "GoLlama" title art
     style.go         shared lipgloss styles and the amber color ramp
+  history/           persists chat transcripts as JSON, one file per
+                     conversation, under ~/.gollama/history
   sysinfo/           what hardware this is about to run on
 
 cmd/inspect/         interactive TUI: type a prompt, run it, inspect the trace
+
+.github/workflows/   CI: go build ./... and go test ./... on every push to main
 ```

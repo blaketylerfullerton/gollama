@@ -92,9 +92,16 @@ func (t chatTab) String() string {
 // chatTurn is one exchange: what you typed, and however much of the model's
 // reply has arrived so far. model grows in place while a turn is in flight,
 // which is what makes the screen a stream rather than a spinner.
+//
+// steps and elapsed are only filled in once the turn finishes (see ChatDone
+// in Update) — they exist so the whole turn, not just its final text, can be
+// written to history and played back later the way it actually happened.
 type chatTurn struct {
 	you   string
 	model string
+
+	steps   []ChatStep
+	elapsed time.Duration
 }
 
 // maxSteps bounds how many tokens' worth of inspect detail are kept. Every
