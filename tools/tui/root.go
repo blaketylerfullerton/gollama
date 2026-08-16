@@ -34,12 +34,13 @@ type Root struct {
 	sys           sysinfo.Info
 	engine        Engine
 
-	at      screenID
-	welcome *Welcome
-	picker  *Picker
-	about   *About
-	history *History
-	chat    *Chat
+	at       screenID
+	welcome  *Welcome
+	picker   *Picker
+	about    *About
+	history  *History
+	download *Download
+	chat     *Chat
 
 	// chatStop ends the engine goroutine behind the chat screen. Held here
 	// rather than on the Chat, because it has to outlive the screen by exactly
@@ -69,6 +70,7 @@ const (
 	atPicker
 	atAbout
 	atHistory
+	atDownload
 	atChat
 )
 
@@ -132,6 +134,8 @@ func (r *Root) current() tea.Model {
 		return r.about
 	case atHistory:
 		return r.history
+	case atDownload:
+		return r.download
 	case atChat:
 		if r.chat != nil {
 			return r.chat
@@ -167,10 +171,37 @@ func (r *Root) advance() tea.Cmd {
 	case atPicker:
 		switch r.picker.Outcome() {
 		case Selected:
-			return r.openChat(r.picker.Selection())
+			m := r.picker.Selection()
+			if !m.Installed && !m.Demo {
+				return r.openDownload(m)
+			}
+			return r.openChat(m)
 		case Back:
 			return r.show(atWelcome)
 		}
+
+	case atDownload:
+		switch r.download.Outcome() {
+		case DownloadDone:
+			m := r.download.Model()
+			r.download = nil
+			// Rescan rather than trust the in-memory Model: the catalog reads
+			// a checkpoint's own config.json once it's on disk, which is the
+			// truth about its shape rather than the built-in guess picker.go
+			// used to describe it before it existed anywhere.
+			r.picker = NewPicker(r.root, r.sys)
+			return r.openChat(findModel(r.picker.models, m.Dir, m))
+		case DownloadFailed:
+			err := r.download.Err()
+			r.download = nil
+			r.picker.warn = "download failed: " + err.Error()
+			return r.show(atPicker)
+		case DownloadBack:
+			r.download = nil
+			return r.show(atPicker)
+		}
+		// DownloadQuit falls through to tea.Quit below, same as every other
+		// screen's own quit outcome.
 
 	case atAbout:
 		if r.about.Outcome() == AboutBack {
@@ -234,6 +265,31 @@ func (r *Root) show(to screenID) tea.Cmd {
 	}
 	r.at = to
 	return tea.Batch(initialize, r.sizeCurrent())
+}
+
+// openDownload fetches m's weights from HuggingFace in the background and
+// shows progress instead of sending the user to another terminal to run
+// huggingface-cli themselves. Only reached from the picker, for a catalog
+// entry whose weights aren't on disk yet.
+func (r *Root) openDownload(m Model) tea.Cmd {
+	r.download = NewDownload(m)
+	r.at = atDownload
+	return tea.Batch(r.download.Init(), r.sizeCurrent())
+}
+
+// findModel looks up dir in models, for the moment right after a download
+// finishes and the freshly rescanned catalog needs to be turned back into the
+// one entry that was just fetched. fallback covers the case that can't
+// actually happen — the directory the catalog was just told to scan not
+// having what was just written to it — so openChat still gets something to
+// load rather than a slice index panicking.
+func findModel(models []Model, dir string, fallback Model) Model {
+	for _, m := range models {
+		if m.Dir == dir {
+			return m
+		}
+	}
+	return fallback
 }
 
 // openChat starts an engine for m and shows the conversation.
