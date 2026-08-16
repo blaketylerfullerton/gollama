@@ -309,7 +309,7 @@ func (r *Root) openChat(m Model) tea.Cmd {
 	go r.engine(ctx, m.Dir, reqs, events)
 
 	r.chatStop = stop
-	r.chat = NewChat(m.Name, m.Arch, events, reqs, r.prompt)
+	r.chat = NewChat(m.Name, m.Arch, m.Dir, events, reqs, r.prompt)
 	r.at = atChat
 	return tea.Batch(r.chat.Init(), r.sizeCurrent())
 }

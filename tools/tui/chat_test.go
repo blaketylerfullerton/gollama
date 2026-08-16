@@ -21,7 +21,7 @@ func newTestChat(t *testing.T, prompt string) (*Chat, chan tea.Msg, chan string)
 	events := make(chan tea.Msg, 8)
 	reqs := make(chan string, 1)
 	arch := known[0].Arch // Qwen3-0.6B's real shape, so the stats bar has real numbers to render
-	c := NewChat("Qwen3-0.6B", arch, events, reqs, prompt)
+	c := NewChat("Qwen3-0.6B", arch, "checkpoints/qwen3-0.6b", events, reqs, prompt)
 	c.Update(tea.WindowSizeMsg{Width: 100, Height: 32})
 	return c, events, reqs
 }
@@ -217,6 +217,101 @@ func TestChatQuitKeys(t *testing.T) {
 		if cmd == nil {
 			t.Errorf("%v did not quit the screen", key)
 		}
+	}
+}
+
+// Typing "/" opens the command menu instead of sending anything, and enter
+// on an exact command name runs it rather than treating it as a message —
+// /model has to send the screen back to the picker the same way esc does.
+func TestChatSlashModelGoesBackToPicker(t *testing.T) {
+	c, _, _ := newTestChat(t, "")
+	c.Update(ChatStatus(""))
+	for _, r := range "/model" {
+		c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if !c.commandMenuActive() {
+		t.Fatal("typing a leading slash did not open the command menu")
+	}
+
+	_, cmd := c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("/model produced no command")
+	}
+	cmd()
+	if c.outcome != ChatBack {
+		t.Errorf("outcome = %v after /model, want ChatBack", c.outcome)
+	}
+}
+
+// /clear empties the transcript on screen and tells the engine to drop its
+// KV cache — otherwise the model would keep generating as though every turn
+// before /clear were still in its context even though the screen no longer
+// shows it.
+func TestChatSlashClearResetsTranscriptAndEngine(t *testing.T) {
+	c, _, reqs := newTestChat(t, "")
+	c.Update(ChatStatus(""))
+	c.Update(tea.KeyMsg{Type: tea.KeyEnter}) // an empty submit does nothing
+	c.turns = append(c.turns, chatTurn{you: "hi", model: "hello"})
+
+	for _, r := range "/clear" {
+		c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	_, cmd := c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("/clear produced no command")
+	}
+	cmd()
+
+	if len(c.turns) != 0 {
+		t.Errorf("turns after /clear = %v, want none", c.turns)
+	}
+	select {
+	case got := <-reqs:
+		if got != ClearMarker {
+			t.Errorf("sent %q to the engine, want the clear marker", got)
+		}
+	default:
+		t.Fatal("/clear never told the engine to drop its cache")
+	}
+}
+
+// An input that matches no command is reported rather than handed to the
+// model — there's no tool for the model to run a command with.
+func TestChatSlashUnknownCommandIsReported(t *testing.T) {
+	c, _, reqs := newTestChat(t, "")
+	c.Update(ChatStatus(""))
+	for _, r := range "/nope" {
+		c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if c.err == nil {
+		t.Error("an unrecognised command was not reported")
+	}
+	select {
+	case req := <-reqs:
+		t.Fatalf("an unrecognised command was sent to the engine: %q", req)
+	default:
+	}
+}
+
+// /help lists the commands right in the transcript rather than sending
+// anything to the engine.
+func TestChatSlashHelpListsCommands(t *testing.T) {
+	c, _, reqs := newTestChat(t, "")
+	c.Update(ChatStatus(""))
+	for _, r := range "/help" {
+		c.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if !strings.Contains(c.transcript(), cmdModel) {
+		t.Error("/help did not list the other commands")
+	}
+	select {
+	case req := <-reqs:
+		t.Fatalf("/help sent something to the engine: %q", req)
+	default:
 	}
 }
 

@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/blaketylerfullerton/GoLlama/tools/amber"
 	"github.com/blaketylerfullerton/GoLlama/tools/history"
 	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
 )
@@ -69,6 +68,12 @@ type ChatErr struct{ Err error }
 // token landing.
 type ChatStatus string
 
+// ClearMarker is sent on reqs in place of a prompt to ask the engine to drop
+// its KV cache and start over, for the /clear command. It's not text any
+// prompt could produce, so the engine can tell "start over" apart from an
+// ordinary line without the channel needing to carry anything but strings.
+const ClearMarker = "\x00gollama:clear\x00"
+
 // ChatOutcome is how the chat screen ended.
 //
 // It didn't used to have one: chat was the last screen of a chain of separate
@@ -113,6 +118,7 @@ type chatTurn struct {
 type Chat struct {
 	label string // what's loaded, for the header — a model name, or "loading…"
 	arch  Arch   // its shape, for the memory estimate in the stats bar
+	dir   string // where the weights came from, for the header; empty for the built-in random model
 
 	events <-chan tea.Msg
 	reqs   chan<- string
@@ -136,7 +142,31 @@ type Chat struct {
 	input textinput.Model
 	vp    viewport.Model
 
+	cmdSel int // which of matchingCommands() is highlighted, while / is being typed
+
 	w, h int
+}
+
+// chatCommand is one slash command: what to type, and what it does, shown
+// side by side in the suggestion row the same way Claude Code's own command
+// menu does.
+type chatCommand struct {
+	name string
+	desc string
+}
+
+const (
+	cmdModel = "/model"
+	cmdClear = "/clear"
+	cmdHelp  = "/help"
+	cmdExit  = "/exit"
+)
+
+var chatCommands = []chatCommand{
+	{cmdModel, "switch to a different model"},
+	{cmdClear, "clear the conversation and free the model's context"},
+	{cmdHelp, "list available commands"},
+	{cmdExit, "quit gollama"},
 }
 
 var _ tea.Model = (*Chat)(nil)
@@ -156,8 +186,10 @@ func chatSysTick() tea.Cmd {
 // reqs is written to once per submitted prompt, so it should be buffered by at
 // least one or Update blocks the render loop on a slow engine. arch describes
 // what's loaded, purely for the memory estimate — the same numbers the picker
-// showed before this screen, so the two stay honest with each other.
-func NewChat(label string, arch Arch, events <-chan tea.Msg, reqs chan<- string, prompt string) *Chat {
+// showed before this screen, so the two stay honest with each other. dir is
+// the checkpoint directory the picker read arch from, shown in the header so
+// the screen says where you are the same way it says what you're running.
+func NewChat(label string, arch Arch, dir string, events <-chan tea.Msg, reqs chan<- string, prompt string) *Chat {
 	in := textinput.New()
 	in.Placeholder = "type anything and press enter"
 	in.SetValue(prompt)
@@ -169,6 +201,7 @@ func NewChat(label string, arch Arch, events <-chan tea.Msg, reqs chan<- string,
 	return &Chat{
 		label:     label,
 		arch:      arch,
+		dir:       dir,
 		events:    events,
 		reqs:      reqs,
 		phase:     chatLoading,
@@ -281,20 +314,166 @@ func (c *Chat) turnRate() string {
 	return fmt.Sprintf("%d tok in %s (%.1f tok/s)", c.turnTokens, elapsed.Round(100*time.Millisecond), rate)
 }
 
+// commandMenuActive says whether the input is in "typing a slash command"
+// mode — the input's whole value is a prefix of one, only while there's
+// somewhere for it to go. Mid-turn there's no idle input to interpret one
+// out of, so it's never active then even if the box still holds a leading
+// slash from before the turn started.
+func (c *Chat) commandMenuActive() bool {
+	return c.phase == chatIdle && strings.HasPrefix(c.input.Value(), "/")
+}
+
+// matchingCommands is which commands the current input could still turn
+// into. It's every command whose name the input is a prefix of — including
+// an exact match, since "/model" is itself a prefix of "/model" — so typing
+// a command out in full still leaves exactly one entry highlighted instead
+// of none.
+func (c *Chat) matchingCommands() []chatCommand {
+	v := c.input.Value()
+	var out []chatCommand
+	for _, cmd := range chatCommands {
+		if strings.HasPrefix(cmd.name, v) {
+			out = append(out, cmd)
+		}
+	}
+	return out
+}
+
+// moveCommandSel steps the highlighted suggestion, wrapping at either end the
+// way a short menu should — there's no dead end to bump against with only a
+// handful of commands.
+func (c *Chat) moveCommandSel(down bool) {
+	n := len(c.matchingCommands())
+	if n == 0 {
+		return
+	}
+	if down {
+		c.cmdSel = (c.cmdSel + 1) % n
+	} else {
+		c.cmdSel = (c.cmdSel - 1 + n) % n
+	}
+}
+
+// completeCommand fills the input with the highlighted suggestion's full
+// name, the way tab-completion does everywhere else — without running it, so
+// a command can still be aimed before it fires.
+func (c *Chat) completeCommand() {
+	matches := c.matchingCommands()
+	if len(matches) == 0 {
+		return
+	}
+	c.input.SetValue(matches[min(c.cmdSel, len(matches)-1)].name)
+	c.input.CursorEnd()
+	c.cmdSel = 0
+}
+
+// runCommand acts on whichever suggestion is highlighted when enter is
+// pressed with the menu open. An input that matches nothing — a typo, or a
+// slash the user meant as plain text — is reported rather than sent to the
+// model: this screen has no way to ask the model to interpret a command it
+// was never given a tool to run.
+func (c *Chat) runCommand() tea.Cmd {
+	matches := c.matchingCommands()
+	c.input.Reset()
+	if len(matches) == 0 {
+		c.err = fmt.Errorf("unknown command — try /help")
+		c.refresh()
+		return nil
+	}
+	name := matches[min(c.cmdSel, len(matches)-1)].name
+	c.cmdSel = 0
+	c.err = nil
+
+	switch name {
+	case cmdModel:
+		// Same exit as esc: the picker is already what answers "run something
+		// else", so switching models is backing out to it, not a screen of
+		// its own.
+		c.outcome = ChatBack
+		return done
+	case cmdExit:
+		c.outcome = ChatQuit
+		return done
+	case cmdClear:
+		return c.clearConversation()
+	case cmdHelp:
+		c.showHelp()
+		return nil
+	}
+	return nil
+}
+
+// clearConversation drops the visible transcript and starts a fresh history
+// entry, then asks the engine to forget its KV cache too — otherwise the
+// screen would say the conversation was over while the model kept
+// generating as though every turn before /clear were still in its context.
+func (c *Chat) clearConversation() tea.Cmd {
+	c.turns = nil
+	c.lastTurnRate = ""
+	c.err = nil
+	started := time.Now()
+	c.sessionID = history.NewID(started)
+	c.startedAt = started
+	c.refresh()
+
+	reqs := c.reqs
+	return func() tea.Msg { reqs <- ClearMarker; return nil }
+}
+
+// showHelp lists the commands as though the model had answered with them —
+// same rendering as a real turn, but nothing was sent to the engine and
+// nothing here is saved to history, since it isn't part of the conversation.
+func (c *Chat) showHelp() {
+	var b strings.Builder
+	for i, cmd := range chatCommands {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "%-8s %s", cmd.name, cmd.desc)
+	}
+	c.turns = append(c.turns, chatTurn{you: cmdHelp, model: b.String()})
+	c.refresh()
+}
+
 func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	menu := c.commandMenuActive()
+
 	switch msg.String() {
 	case "ctrl+c":
 		c.outcome = ChatQuit
 		return c, done
 	case "esc":
+		if menu {
+			// Cancels the command being typed rather than leaving the
+			// screen — esc backing out of chat entirely from here would
+			// make "/" itself a trap the moment you change your mind about
+			// what to type.
+			c.input.Reset()
+			c.cmdSel = 0
+			return c, nil
+		}
 		// Back to the picker, the same thing esc does on every other screen —
 		// rather than out of the program, which is what it used to do here and
 		// what made a mistyped esc mid-conversation unrecoverable.
 		c.outcome = ChatBack
 		return c, done
 	case "enter":
+		if menu {
+			return c, c.runCommand()
+		}
 		return c, c.submit()
-	case "up", "down", "pgup", "pgdown", "ctrl+u", "ctrl+d":
+	case "tab":
+		if menu {
+			c.completeCommand()
+			return c, nil
+		}
+	case "up", "down":
+		if menu {
+			c.moveCommandSel(msg.String() == "down")
+			return c, nil
+		}
+		fallthrough
+	case "pgup", "pgdown", "ctrl+u", "ctrl+d":
 		var cmd tea.Cmd
 		c.vp, cmd = c.vp.Update(msg)
 		return c, cmd
@@ -307,6 +486,7 @@ func (c *Chat) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	c.input, cmd = c.input.Update(msg)
+	c.cmdSel = 0
 	return c, cmd
 }
 
@@ -355,19 +535,6 @@ func (c *Chat) anchorBottom(content string, height int) string {
 	return content
 }
 
-// stageLabel names what the engine is doing right now, in the same words the
-// toolbar's status line would use — loading, idle, or mid-turn.
-func (c *Chat) stageLabel() string {
-	switch c.phase {
-	case chatLoading:
-		return "loading"
-	case chatGenerating:
-		return "generating"
-	default:
-		return "idle"
-	}
-}
-
 // tpsLabel is the live rate while a turn is in flight, or the last completed
 // turn's rate once it's settled — never both, since only one is ever the
 // current answer to "how fast is this going".
@@ -380,25 +547,6 @@ func (c *Chat) tpsLabel() string {
 		return c.lastTurnRate
 	}
 	return ""
-}
-
-// ramGauge is a compact bar of used-vs-total memory, the same colour-by-
-// fraction bar the picker draws before a model is even loaded — brighter as
-// it fills, no legend needed. Narrower than the picker's own gauge: this one
-// sits in a small corner box rather than a panel with room to spare.
-func (c *Chat) ramGauge() string {
-	if c.sys.MemoryBytes == 0 {
-		return dimStyle.Render("ram unknown")
-	}
-	used := c.sys.MemoryBytes - c.sys.AvailableBytes
-	frac := float64(used) / float64(c.sys.MemoryBytes)
-	style := lipgloss.NewStyle().Foreground(amber.Of(frac))
-
-	const width = 14
-	filled := min(int(frac*width+0.5), width)
-	bar := style.Render(strings.Repeat("█", filled)) +
-		amber.NFg(amber.Rule).Render(strings.Repeat("░", width-filled))
-	return bar + "  " + dimStyle.Render(memPhrase(c.sys))
 }
 
 func (c *Chat) transcript() string {
@@ -565,46 +713,82 @@ func (c *Chat) View() string {
 
 	rows := []string{
 		c.infoBox(inner), "",
-		panel, "",
+		panel, c.commandHint(inner),
 		c.input.View(),
 	}
 
 	return screen(c.w, c.h, lipgloss.JoinVertical(lipgloss.Left, rows...), bar)
 }
 
-// infoBoxWidth is the outer width of the corner box — wide enough for its
-// widest line, the RAM gauge plus its free/total readout, without stretching
-// across the terminal the way a full-width header used to. See style.go's
-// panelChrome: the usable text column inside is this minus 6 (padding plus
-// border).
-const infoBoxWidth = 60
-
-// infoBox is what used to be spread across a header line and a stats line
-// above the toolbar, now one box in the top-left corner: what's loaded, what
-// it's doing, and what it's costing, the same shape the welcome screen's
-// "This machine" panel uses for the same kind of glance-and-move-on numbers.
-//
-// available is the full width the screen has to work with; the box only
-// takes infoBoxWidth of it unless the terminal itself is narrower, so it
-// reads as a corner box rather than another full-width header.
+// infoBox is the identity card every chat opens with — the same job a coding
+// agent's own splash box does: name the program, say what it's for, and
+// place you (which model, which machine, which files) before you type
+// anything. It doesn't change once the screen is up, unlike the old corner
+// box it replaced, which packed in the stage/ram/tok-s numbers that now live
+// in the toolbar instead (see footerStatus) — those move on every token, and
+// a card that's supposed to orient you shouldn't be reflowing under your eye
+// while you read it.
 func (c *Chat) infoBox(available int) string {
+	// Less the border, which lipgloss draws outside the width it's given — the
+	// panel below does the same subtraction.
+	width := available - 2
 	rows := []string{
-		heading(c.label),
-		row("stage", c.stageLabel()),
-		labelStyle.Render("ram") + c.ramGauge(),
-		row("resident", "~"+sysinfo.Bytes(c.arch.ResidentBytes())),
-	}
-	if rate := c.tpsLabel(); rate != "" {
-		rows = append(rows, row("tok/s", rate))
+		titleStyle.Render("GoLlama"),
+		valueStyle.Render("Welcome — type anything to chat, or / for commands"),
+		dimStyle.Render("model ") + valueStyle.Render(c.label) +
+			dimStyle.Render("   host ") + valueStyle.Render(c.sys.Host),
+		dimStyle.Render("dir ") + valueStyle.Render(c.dirLabel()),
 	}
 	if c.err != nil {
 		rows = append(rows, "", warnStyle.Render(c.err.Error()))
 	}
-	// Less the border, which lipgloss draws outside the width it's given — the
-	// panel below does the same subtraction. Without it the box renders two
-	// cells wider than infoBoxWidth claims, and at a narrow terminal those two
-	// cells plus the screen margin put the frame over the edge.
-	return panelStyle.Width(min(infoBoxWidth, available) - 2).Render(strings.Join(rows, "\n"))
+	// No blank spacer rows: at a short terminal this box competes with the
+	// transcript panel and the input box for the same handful of lines (see
+	// layout, and TestChatKeepsTheInputBox), and a header that grows with
+	// blank lines takes those rows straight from the input box rather than
+	// from anything the user would notice missing.
+	return panelStyle.Width(width).Render(strings.Join(rows, "\n"))
+}
+
+// dirLabel is where the weights this screen is talking to came from — the
+// checkpoint directory, standing in for "the file you're in" the way a
+// coding agent's own splash box shows its working directory. The built-in
+// demo model was never read off disk, so there's no path to show for it.
+func (c *Chat) dirLabel() string {
+	if c.dir == "" {
+		return "— (built-in random model, no checkpoint on disk)"
+	}
+	return c.dir
+}
+
+// commandHint takes the place of the blank line between the transcript panel
+// and the input while a slash command is being typed, listing whichever
+// commands it could still become. It's exactly one line whether it has
+// anything to say or not — an empty string is one blank line the same as the
+// line it replaces — so a command menu opening never resizes anything else
+// on screen the way a dropdown panel of its own would.
+func (c *Chat) commandHint(width int) string {
+	if !c.commandMenuActive() {
+		return ""
+	}
+	matches := c.matchingCommands()
+	if len(matches) == 0 {
+		return warnStyle.Render("no matching command — try /help")
+	}
+	sel := min(c.cmdSel, len(matches)-1)
+	parts := make([]string, len(matches))
+	for i, cmd := range matches {
+		if i == sel {
+			parts[i] = selectedStyle.Render(" " + cmd.name + " ")
+		} else {
+			parts[i] = dimStyle.Render(cmd.name)
+		}
+	}
+	line := strings.Join(parts, "  ")
+	if desc := matches[sel].desc; lipgloss.Width(line)+3+lipgloss.Width(desc) <= width {
+		line += dimStyle.Render("   " + desc)
+	}
+	return line
 }
 
 // memPhrase is "6.4GB free of 16.0GB", or "unknown" on a platform sysinfo
@@ -621,9 +805,27 @@ func memPhrase(s sysinfo.Info) string {
 func (c *Chat) bar() string {
 	keys := []string{
 		keyStyle.Render("enter") + dimStyle.Render(" send"),
+		keyStyle.Render("/") + dimStyle.Render(" commands"),
 		keyStyle.Render("↑↓") + dimStyle.Render(" scroll"),
 		keyStyle.Render("esc") + dimStyle.Render(" back"),
 		keyStyle.Render("ctrl+c") + dimStyle.Render(" quit"),
 	}
-	return toolbar(c.w, strings.Join(keys, dimStyle.Render(" · ")), dimStyle.Render(c.status))
+	return toolbar(c.w, strings.Join(keys, dimStyle.Render(" · ")), dimStyle.Render(c.footerStatus()))
+}
+
+// footerStatus is the toolbar's right side. c.status carries the two
+// messages that outrank everything else — "loading…" while the checkpoint
+// is still coming off disk, "thinking…" mid-turn — and once neither applies,
+// this is where the resident-memory and last-turn-rate numbers that used to
+// live in the header moved to: still one glance away, just off the identity
+// card at the top that no longer changes underneath you turn to turn.
+func (c *Chat) footerStatus() string {
+	if c.status != "" {
+		return c.status
+	}
+	status := "resident ~" + sysinfo.Bytes(c.arch.ResidentBytes()) + "  ·  ram " + memPhrase(c.sys)
+	if rate := c.tpsLabel(); rate != "" {
+		status += "  ·  " + rate
+	}
+	return status
 }

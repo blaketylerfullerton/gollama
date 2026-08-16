@@ -113,6 +113,17 @@ func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- 
 		case text = <-reqs:
 		}
 
+		if text == tui.ClearMarker {
+			// /clear already wiped the screen's own transcript; this is what
+			// makes that true of the model too — a fresh cache and an empty
+			// seq, so the next turn starts the way turn zero did rather than
+			// continuing a conversation the screen no longer shows.
+			cache = model.NewKVCache(cfg)
+			seq = seq[:0]
+			turn = 0
+			continue
+		}
+
 		ids := s.tok.Encode(text)
 		if turn > 0 {
 			// Turns after the first are a continuation of the transcript, not
