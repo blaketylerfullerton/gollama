@@ -54,7 +54,20 @@ const chatCandidates = 4
 // it — the history screen steps back through that later. That's the same
 // instrumentation cmd/inspect runs, just read out as two short lists instead of
 // full matrices.
-func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- tea.Msg) {
+//
+// That instrumentation isn't free: tracing forces every attention head to run
+// sequentially instead of across goroutines (see the comment on Attention.Forward),
+// which costs an order of magnitude of throughput on the real model. newChatEngine
+// takes that trade-off as a parameter rather than always paying it — traceAttention
+// defaults to off (see -trace-chat), which still streams tokens and next-token
+// candidates, it just leaves the "what did it attend to" list empty.
+func newChatEngine(traceAttention bool) tui.Engine {
+	return func(ctx context.Context, dir string, reqs <-chan string, out chan<- tea.Msg) {
+		chatEngine(ctx, dir, reqs, out, traceAttention)
+	}
+}
+
+func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- tea.Msg, traceAttention bool) {
 	defer close(out)
 
 	// No status is sent before the checkpoint is loaded: tui.Chat already opens
@@ -147,9 +160,13 @@ func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- 
 
 			// Trace only this one decode pass — a single new token attending
 			// back over everything cached so far — so the step below describes
-			// exactly the token that was just produced, not the whole run.
+			// exactly the token that was just produced, not the whole run. Only
+			// done when asked: it's what forces attention heads sequential, so
+			// skipping it is what keeps chat at full throughput by default.
 			collector.Reset()
-			s.gpt.Trace = collector
+			if traceAttention {
+				s.gpt.Trace = collector
+			}
 			logits, err = s.gpt.ForwardCached([]int{next}, cache)
 			s.gpt.Trace = nil
 			if err != nil {

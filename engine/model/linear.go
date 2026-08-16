@@ -73,11 +73,8 @@ func MatMul(x [][]float32, lin Linear) [][]float32 {
 // matMulRange computes dst[o] = row . weightRow(o) [+ bias[o]] for o in [oStart, oEnd).
 func matMulRange(row []float32, lin Linear, dst []float32, oStart, oEnd int) {
 	for o := oStart; o < oEnd; o++ {
-		var sum float32
 		weightRow := lin.Weight[o*lin.In : (o+1)*lin.In]
-		for i := 0; i < lin.In; i++ {
-			sum += row[i] * weightRow[i]
-		}
+		sum := dotProduct(row, weightRow)
 		if lin.Bias != nil {
 			sum += lin.Bias[o]
 		}

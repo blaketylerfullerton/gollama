@@ -402,28 +402,65 @@ func (c *Chat) ramGauge() string {
 }
 
 func (c *Chat) transcript() string {
+	width := max(c.vp.Width, 20)
 	if len(c.turns) == 0 {
-		return dimStyle.Render("Nothing sent yet — whatever you type continues from where the model's\n" +
-			"context left off, the same way the prompt on the previous screen would have.")
+		empty := "Nothing sent yet — whatever you type continues from where the model's " +
+			"context left off, the same way the prompt on the previous screen would have."
+		return dimStyle.Render(lipgloss.NewStyle().Width(width).Render(empty))
 	}
 	blocks := make([]string, len(c.turns))
 	for i, t := range c.turns {
 		reply := t.model
 		if reply == "" && i == len(c.turns)-1 && c.phase == chatGenerating {
-			blocks[i] = renderTurn(t.you, "") + dimStyle.Render("…")
+			blocks[i] = renderTurn(t.you, "", width) + dimStyle.Render("…")
 			continue
 		}
-		blocks[i] = renderTurn(t.you, reply)
+		blocks[i] = renderTurn(t.you, reply, width)
 	}
 	return strings.Join(blocks, "\n\n")
 }
 
+// modelMarker stands in for the word "model" — a dot rather than a label,
+// the way a coding agent's own transcript marks its turns apart from yours
+// without spelling out who's talking on every line.
+const modelMarker = "●"
+
+// speakerColumn is wide enough for "you" plus a gap — the model's marker
+// pads out to the same width so both speakers' text starts in the same
+// column instead of the dot's reply sitting flush against the border.
+const speakerColumn = 5
+
 // renderTurn is one you/model exchange, styled the same way whether it's
 // live in the chat tab or read back from history.Save later — a saved
 // conversation should look like the one that produced it.
-func renderTurn(you, model string) string {
-	return youStyle.Render("you") + "  " + valueStyle.Render(you) + "\n" +
-		modelStyle.Render("model") + "  " + modelReplyStyle.Render(model)
+//
+// width is the viewport's own width. bubbles/viewport has no word-wrapping of
+// its own — unlike the panels drawn with lipgloss's Width elsewhere in this
+// package, it only ever clips a line to its width character-for-character —
+// so a long message handed to it raw runs off the right edge instead of
+// reflowing. Wrapping it here, before it reaches SetContent, is the same fix
+// about.go's body() uses for the same reason.
+func renderTurn(you, model string, width int) string {
+	return renderSpeaker("you", youStyle, valueStyle, you, width) + "\n" +
+		renderSpeaker(modelMarker, modelStyle, modelReplyStyle, model, width)
+}
+
+// renderSpeaker is one label/text row, padded to speakerColumn and wrapped to
+// width with any continuation lines indented under the label so a long
+// message reads as a paragraph rather than a wall of text sitting flush
+// against the left edge.
+func renderSpeaker(label string, labelStyle, textStyle lipgloss.Style, text string, width int) string {
+	pad := max(speakerColumn-lipgloss.Width(label), 1)
+	prefixWidth := lipgloss.Width(label) + pad
+	wrapWidth := max(width-prefixWidth, 10)
+	lines := strings.Split(lipgloss.NewStyle().Width(wrapWidth).Render(text), "\n")
+
+	out := labelStyle.Render(label) + strings.Repeat(" ", pad) + textStyle.Render(lines[0])
+	indent := strings.Repeat(" ", prefixWidth)
+	for _, l := range lines[1:] {
+		out += "\n" + indent + textStyle.Render(l)
+	}
+	return out
 }
 
 // save persists the conversation so far. It's called once per completed

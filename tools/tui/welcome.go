@@ -20,7 +20,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/blaketylerfullerton/GoLlama/tools/amber"
 	"github.com/blaketylerfullerton/GoLlama/tools/history"
 	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
 )
@@ -166,14 +165,19 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return w, llamaTick()
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "left", "h":
+		case "up", "k":
 			w.cursor = max(w.cursor-1, 0)
-		case "right", "l":
+		case "down", "j":
 			w.cursor = min(w.cursor+1, len(menuItems)-1)
 		case "enter", " ":
 			w.choice = menuItems[w.cursor].choice
 			return w, done
-		case "q", "esc", "ctrl+c":
+		// esc is deliberately not bound here: every other screen uses it to go
+		// back a level, and this is the screen you land back on after doing
+		// that. Wiring the same key to quit here would mean the one reflex
+		// trained everywhere else silently closes the program the first time
+		// it's used out of habit.
+		case "q", "ctrl+c":
 			w.choice = Quit
 			return w, done
 		}
@@ -187,23 +191,6 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 const minSpecsWidth = 48
 
 const subtitle = "a transformer you can read, one token at a time"
-
-// menuChrome is a box's padding (4) plus border (2), the same convention
-// panelChrome uses elsewhere — see style.go.
-const menuChrome = 6
-
-// menuMinWidth is the narrowest the menu can be drawn without wrapping a
-// title onto a second line: each box wide enough for its own title plus
-// chrome, side by side with a gap between each pair.
-func menuMinWidth() int {
-	const gap = 2
-	longest := 0
-	for _, item := range menuItems {
-		longest = max(longest, len(item.title)+2) // +2 for the "▸ " cursor
-	}
-	n := len(menuItems)
-	return n*(longest+menuChrome) + (n-1)*gap
-}
 
 func (w *Welcome) View() string {
 	bar := w.bar()
@@ -254,42 +241,11 @@ func (w *Welcome) column(width, rows int) string {
 		menu)
 }
 
-// menu is the side-by-side option boxes underneath the machine panel: what you
-// can do from here, toggled left/right, with the highlighted box picked out
-// the same way the picker's cursor points at the memory column.
-//
-// Below menuMinWidth there isn't room for every title on one line without
-// wrapping, so it falls back to a single-line title strip over one detail
-// panel — the same shape the two-item menu used before there were three of
-// them to fit, kept for whatever terminal is too narrow for the boxes.
+// menu is the list of what you can do from here: one title per line, toggled
+// up/down the same way the picker's and history's own lists are, with the
+// highlighted title's detail rendered in a single panel underneath it —
+// machine specs for "select a model", a teaser for the other two.
 func (w *Welcome) menu(width, rows int) string {
-	if width < menuMinWidth() {
-		return w.menuStacked(width, rows)
-	}
-	// n boxes with a gap between each pair, splitting whatever's left evenly.
-	const gap = 2
-	n := len(menuItems)
-	boxWidth := (width - gap*(n-1)) / n
-	boxes := make([]string, n)
-	for i, item := range menuItems {
-		style := panelStyle.Width(boxWidth - 2)
-		title := "  " + dimStyle.Render(item.title)
-		if i == w.cursor {
-			style = style.BorderForeground(amber.At(amber.Accent))
-			title = selectedStyle.Render("▸ " + item.title)
-		}
-		body := lipgloss.JoinVertical(lipgloss.Left, title, "", item.detail(w))
-		boxes[i] = stretch(style, rows, body)
-	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, joinWithGaps(boxes, gap)...)
-}
-
-// menuStacked is the narrow-terminal fallback: one title per line rather than
-// a row of them, since a terminal too narrow for the boxes side by side is
-// also too narrow for their titles side by side in a strip. The highlighted
-// one's detail goes underneath in a single panel that takes the full width
-// instead of a third of it.
-func (w *Welcome) menuStacked(width, rows int) string {
 	titles := make([]string, len(menuItems))
 	for i, item := range menuItems {
 		if i == w.cursor {
@@ -302,20 +258,6 @@ func (w *Welcome) menuStacked(width, rows int) string {
 	panel := stretch(panelStyle.Width(width-2), rows-lipgloss.Height(list)-1,
 		menuItems[w.cursor].detail(w))
 	return lipgloss.JoinVertical(lipgloss.Left, list, "", panel)
-}
-
-// joinWithGaps interleaves a fixed-width blank column between each element,
-// for lipgloss.JoinHorizontal calls over a slice whose length isn't fixed at
-// two.
-func joinWithGaps(boxes []string, gap int) []string {
-	out := make([]string, 0, 2*len(boxes)-1)
-	for i, b := range boxes {
-		if i > 0 {
-			out = append(out, strings.Repeat(" ", gap))
-		}
-		out = append(out, b)
-	}
-	return out
 }
 
 // machineSpecs is the always-visible panel above the menu: what this machine
@@ -428,7 +370,7 @@ func (w *Welcome) historyBlurb() string {
 // left, and the other way into the program on the right.
 func (w *Welcome) bar() string {
 	keys := []string{
-		keyStyle.Render("←→") + dimStyle.Render(" choose"),
+		keyStyle.Render("↑↓") + dimStyle.Render(" choose"),
 		keyStyle.Render("enter") + dimStyle.Render(" select"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}

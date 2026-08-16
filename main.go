@@ -50,6 +50,7 @@ func main() {
 	prompt := flag.String("prompt", "The capital of France is", "prompt to run through the model")
 	tracePath := flag.String("trace", "", "write a trace of the forward pass to this file")
 	noSplash := flag.Bool("no-splash", false, "skip the welcome screen and run straight away")
+	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay (forces attention heads to run sequentially, which costs real throughput)")
 	flag.Parse()
 
 	// The splash goes first, before any checkpoint is touched: it says what
@@ -65,7 +66,7 @@ func main() {
 	// package tui deliberately knows nothing about a model.
 	interactive := !*noSplash && isTerminal(os.Stdout)
 	if interactive {
-		if err := tui.Start(checkpointDir, *prompt, chatEngine); err != nil {
+		if err := tui.Start(checkpointDir, *prompt, newChatEngine(*traceChat)); err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}

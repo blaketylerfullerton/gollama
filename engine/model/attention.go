@@ -50,14 +50,9 @@ func CausalAttention(q, k, v [][]float32, offset int) (out [][]float32, weights 
 		scores := make([]float32, pos+1)
 		maxScore := float32(math.Inf(-1))
 		for tk := 0; tk <= pos; tk++ {
-			var dot float32
-			for i := 0; i < headDim; i++ {
-				dot += q[tq][i] * k[tk][i]
-			}
-
 			// Scale by 1/sqrt(headDim): without it, dot products grow with
 			// dimension and push softmax into a near one-hot regime.
-			dot *= scale
+			dot := dotProduct(q[tq], k[tk]) * scale
 			scores[tk] = dot
 			if dot > maxScore {
 				maxScore = dot
@@ -176,11 +171,7 @@ func (a *Attention) headContribution(h int, concat []float32) []float32 {
 	c := make([]float32, a.Wo.Out)
 	for o := range c {
 		row := a.Wo.Weight[o*a.Wo.In : (o+1)*a.Wo.In]
-		var sum float32
-		for i := 0; i < a.HeadDim; i++ {
-			sum += concat[lo+i] * row[lo+i]
-		}
-		c[o] = sum
+		c[o] = dotProduct(concat[lo:lo+a.HeadDim], row[lo:lo+a.HeadDim])
 	}
 	return c
 }

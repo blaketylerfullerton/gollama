@@ -108,6 +108,10 @@ func (h *History) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		h.cursor = max(h.cursor-1, 0)
 	case "down", "j":
 		h.cursor = min(h.cursor+1, len(h.convos)-1)
+	case "home", "g":
+		h.cursor = 0
+	case "end", "G":
+		h.cursor = max(len(h.convos)-1, 0)
 	case "enter", " ":
 		if len(h.convos) == 0 {
 			return h, nil
@@ -264,9 +268,10 @@ func (h *History) playDelay() time.Duration {
 // isn't just the text typed out slowly but the same instrumentation replayed.
 func (h *History) playbackContent() string {
 	c := h.convos[h.cursor]
+	width := max(h.vp.Width, 20)
 	var blocks []string
 	for i := 0; i < h.playTurn && i < len(c.Turns); i++ {
-		blocks = append(blocks, renderTurn(c.Turns[i].You, c.Turns[i].Model))
+		blocks = append(blocks, renderTurn(c.Turns[i].You, c.Turns[i].Model, width))
 	}
 	if h.playTurn < len(c.Turns) {
 		t := c.Turns[h.playTurn]
@@ -283,7 +288,7 @@ func (h *History) playbackContent() string {
 				lastStep = &t.Steps[n-1]
 			}
 		}
-		block := renderTurn(t.You, partial)
+		block := renderTurn(t.You, partial, width)
 		if lastStep != nil {
 			block += "\n" + dimStyle.Render("  attended to  ") + candidateList(fromHistoryCandidates(lastStep.Attention)) +
 				"\n" + dimStyle.Render("  ranked next  ") + candidateList(fromHistoryCandidates(lastStep.Candidates))
@@ -334,9 +339,10 @@ func (h *History) transcript() string {
 	if len(c.Turns) == 0 {
 		return dimStyle.Render("This conversation has no turns in it.")
 	}
+	width := max(h.vp.Width, 20)
 	blocks := make([]string, len(c.Turns))
 	for i, t := range c.Turns {
-		blocks[i] = renderTurn(t.You, t.Model)
+		blocks[i] = renderTurn(t.You, t.Model, width)
 	}
 	return strings.Join(blocks, "\n\n")
 }
