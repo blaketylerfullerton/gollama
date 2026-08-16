@@ -165,16 +165,10 @@ func (p *Picker) scroll() {
 	p.top = max(0, min(p.top, len(p.models)-rows))
 }
 
-// choose accepts the highlighted model, or explains why it can't. A row whose
-// weights aren't there is left on the list rather than hidden — knowing the
-// model exists and what it would cost is most of the point — so enter on it has
-// to say something rather than do nothing.
+// choose accepts the highlighted model. Root decides what enter actually does
+// with it: run it straight away if the weights are already on disk, or fetch
+// them first if they aren't — this screen doesn't need to know which.
 func (p *Picker) choose() tea.Cmd {
-	m := p.Selection()
-	if !m.Installed && !m.Demo {
-		p.warn = m.Name + " isn't downloaded yet — run the command above, then come back"
-		return nil
-	}
 	p.outcome = Selected
 	return done
 }
@@ -345,7 +339,7 @@ func status(m Model) string {
 	case m.Installed:
 		return "ready"
 	default:
-		return "get it"
+		return "download"
 	}
 }
 
@@ -538,11 +532,10 @@ func (p *Picker) about(notes int) string {
 			"%s parameters · %d vocabulary · %d max context · %s",
 			params(a.Params()), a.VocabSize, a.Context, tied)))
 
-	if cmd := m.Download(); cmd != nil && !m.Installed {
-		rows = append(rows, "")
-		for _, line := range cmd {
-			rows = append(rows, keyStyle.Render(line))
-		}
+	if m.Repo != "" && !m.Installed {
+		rows = append(rows, "",
+			dimStyle.Render(fmt.Sprintf("not downloaded — press enter to fetch %s from HuggingFace",
+				sysinfo.Bytes(a.DiskBytes()))))
 	}
 	return strings.Join(rows, "\n")
 }

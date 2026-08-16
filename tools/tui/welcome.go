@@ -181,9 +181,9 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return w, nil
 }
 
-// minSpecsWidth is the narrowest the panel can be rendered and still hold its
-// longest line — the huggingface-cli invocation, which is the one thing on the
-// screen that has to be copied verbatim.
+// minSpecsWidth is the narrowest the panel can be rendered and still read as
+// a panel rather than a column of wrapped fragments. Shared with every other
+// screen's own minimum-width floor, for the same reason.
 const minSpecsWidth = 48
 
 const subtitle = "a transformer you can read, one token at a time"
@@ -361,11 +361,11 @@ func (w *Welcome) checkpointRows() []string {
 			styledRow("model", warnStyle.Render("none found")),
 			row("expected", w.ckpt.Dir),
 			"",
-			dimStyle.Render("  huggingface-cli download Qwen/Qwen3-0.6B"),
-			dimStyle.Render("    --local-dir " + w.ckpt.Dir),
+			dimStyle.Render("Pick \"select a model\" and press enter on one — it downloads"),
+			dimStyle.Render("straight from HuggingFace, no separate command to run."),
 			"",
-			dimStyle.Render("Without it GoLlama runs a tiny random model, so"),
-			dimStyle.Render("every stage still works and the numbers are noise."),
+			dimStyle.Render("Until then GoLlama runs a tiny random model, so every stage"),
+			dimStyle.Render("still works and the numbers are noise."),
 		}
 	}
 	return []string{

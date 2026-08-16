@@ -104,17 +104,6 @@ type Model struct {
 	Demo      bool  // the tiny random model, which needs no download
 }
 
-// Download is the command that fetches this model.
-func (m Model) Download() []string {
-	if m.Repo == "" {
-		return nil
-	}
-	return []string{
-		"huggingface-cli download " + m.Repo,
-		"  --local-dir " + m.Dir,
-	}
-}
-
 // known is the Qwen3 dense family, smallest first.
 //
 // Only dense models are listed. The MoE checkpoints (30B-A3B and up) share the

@@ -237,25 +237,16 @@ func TestPickerKeys(t *testing.T) {
 
 // Enter on a model that isn't downloaded has to say so. Quitting to a failed
 // load, or sitting there doing nothing, are both worse.
-func TestPickerRefusesUninstalledModel(t *testing.T) {
+// enter on a model with no weights on disk still selects it — Root is the one
+// that decides a missing checkpoint means "fetch it first", not this screen.
+func TestPickerSelectsUninstalledModel(t *testing.T) {
 	p := NewPicker(t.TempDir(), testSys()) // nothing installed
 	_, cmd := p.Update(key("enter"))
-	if cmd != nil {
-		t.Fatal("enter quit the screen for a model with no weights on disk")
+	if cmd == nil {
+		t.Fatal("enter did nothing for a model with no weights on disk")
 	}
-	if p.Outcome() == Selected {
-		t.Fatal("outcome is Selected for a model that cannot load")
-	}
-	if p.warn == "" {
-		t.Error("nothing was said about why enter did nothing")
-	}
-	if !strings.Contains(p.View(), "isn't downloaded") {
-		t.Error("the explanation never reached the screen")
-	}
-	// Moving on clears it, or a stale complaint sits under an unrelated model.
-	p.Update(key("j"))
-	if p.warn != "" {
-		t.Error("the warning survived moving the cursor")
+	if p.Outcome() != Selected {
+		t.Fatal("outcome is not Selected for a model whose weights aren't downloaded yet")
 	}
 }
 
@@ -398,8 +389,8 @@ func TestPickerShowsTheDownloadCommand(t *testing.T) {
 	// see the trimming in View.
 	p.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	view := p.View()
-	if !strings.Contains(view, "huggingface-cli download Qwen/Qwen3-0.6B") {
-		t.Error("no download command for a model that isn't installed")
+	if !strings.Contains(view, "press enter to fetch") {
+		t.Error("no mention of fetching the model for one that isn't installed")
 	}
 	if !strings.Contains(view, "to download") {
 		t.Error("the memory panel does not say how big the download is")
