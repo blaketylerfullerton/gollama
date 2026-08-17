@@ -21,6 +21,12 @@ import (
 // against the edge of the terminal.
 const screenMargin = 1
 
+// Version names this build, shown beside the title on the chat screen's
+// identity card. There's no release process behind it yet — it's a single
+// constant to bump by hand — but a card that says what's loaded shouldn't
+// leave out the one thing that changes between runs of GoLlama itself.
+const Version = "v0.1.0"
+
 // bodyRows is how many rows the body gets at terminal height h — everything but
 // the blank line at the top and the toolbar at the bottom. The bar is measured
 // rather than assumed: it grows a line when there's something to say beyond the
@@ -95,6 +101,24 @@ func hero(title, subtitle string, width int) string {
 		return header(title, subtitle, width)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, art, "", subtitleStyle.Render(subtitle))
+}
+
+// titleRule is a title badge sitting on a rule that spans width — the line
+// runs behind the badge rather than stopping short of it, the way a printed
+// page's running head breaks a rule instead of leaving a gap beside it.
+//
+// The badge is titleStyle, which is a reversed field rather than plain text
+// (see style.go) — that's what makes the rule read as passing behind it
+// instead of just ending next to it.
+func titleRule(title string, width int) string {
+	badge := titleStyle.Render(title)
+	gap := width - lipgloss.Width(badge)
+	if gap < 2 {
+		return badge
+	}
+	left := gap / 2
+	return ruleStyle.Render(strings.Repeat("─", left)) + badge +
+		ruleStyle.Render(strings.Repeat("─", gap-left))
 }
 
 // stretch renders s inside style, grown to occupy n rows when the content is

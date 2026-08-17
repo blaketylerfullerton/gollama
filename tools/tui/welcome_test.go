@@ -94,6 +94,26 @@ func TestScanCheckpointPresent(t *testing.T) {
 	}
 }
 
+// Every real Qwen3 checkpoint above 0.6B ships sharded — model.safetensors
+// never exists, only model-0000N-of-0000M.safetensors plus an index — so a
+// scan that only looked for the single-file name reported a fully and
+// correctly downloaded checkpoint as not present at all.
+func TestScanCheckpointPresentSharded(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "model-00001-of-00002.safetensors"), 1024)
+	write(t, filepath.Join(dir, "model-00002-of-00002.safetensors"), 1024)
+	write(t, filepath.Join(dir, "model.safetensors.index.json"), 52)
+	write(t, filepath.Join(dir, "config.json"), 52)
+
+	c := ScanCheckpoint(dir)
+	if !c.Present {
+		t.Fatal("did not find a sharded checkpoint with no single model.safetensors")
+	}
+	if c.Bytes != 2152 {
+		t.Errorf("Bytes = %d, want 2152 (both shards, the index, and config.json)", c.Bytes)
+	}
+}
+
 // enter is the only way through to the model, and q the only way out; a typo in
 // either leaves the user stuck on the splash.
 func TestWelcomeKeys(t *testing.T) {

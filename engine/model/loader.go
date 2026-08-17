@@ -3,7 +3,28 @@ package model
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 )
+
+// HasWeights reports whether dir holds a checkpoint's weights — either a
+// single model.safetensors, or, for anything past Qwen3-0.6B, a sharded
+// model-0000N-of-0000M.safetensors set named by model.safetensors.index.json.
+//
+// Every caller that needs to know "is a real checkpoint here" (main's
+// checkpoint auto-detect, cmd/inspect's -model flag) was checking only the
+// single-file name, which made a fully and correctly downloaded Qwen3-1.7B,
+// 4B, or 8B look exactly like an empty directory: the answer was "no", so
+// they fell back to whatever "no checkpoint" means to them, silently for
+// main and loudly for cmd/inspect, in both cases for a checkpoint that was
+// actually right there.
+func HasWeights(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "model.safetensors.index.json")); err == nil {
+		return true
+	}
+	_, err := os.Stat(filepath.Join(dir, "model.safetensors"))
+	return err == nil
+}
 
 // FromDirectory loads a HuggingFace Qwen3 checkpoint: config.json for the
 // architecture, model.safetensors (possibly sharded) for the weights.

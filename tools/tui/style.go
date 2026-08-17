@@ -43,6 +43,11 @@ var (
 			Border(lipgloss.RoundedBorder()).BorderForeground(amber.N(amber.Edge)).
 			Padding(0, 2)
 
+	// ruleStyle draws a divider a title badge sits on top of — see titleRule.
+	// A step below the panel border, the same weight the toolbar's own frame
+	// uses, so the line reads as chrome rather than as content of its own.
+	ruleStyle = amber.NFg(amber.Rule)
+
 	// The toolbar takes the same border as the panels — it's part of the same
 	// frame — but a step dimmer. It says the same thing on every screen, so it
 	// shouldn't compete for attention with the numbers above it.

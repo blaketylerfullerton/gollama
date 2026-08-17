@@ -71,7 +71,16 @@ type Checkpoint struct {
 // it's the normal state of a fresh clone, and the screen says so.
 func ScanCheckpoint(dir string) Checkpoint {
 	c := Checkpoint{Dir: dir}
-	if _, err := os.Stat(filepath.Join(dir, "model.safetensors")); err != nil {
+	// Qwen3-0.6B ships as a single model.safetensors; everything bigger
+	// shards across model-0000N-of-0000M.safetensors instead, named by
+	// model.safetensors.index.json. Checking only the single-file name
+	// reported a fully downloaded 1.7B/4B/8B checkpoint as not present at
+	// all — this package doesn't import engine/model to ask it directly
+	// (see root.go's Engine type), so the check is duplicated here rather
+	// than shared.
+	_, errSingle := os.Stat(filepath.Join(dir, "model.safetensors"))
+	_, errSharded := os.Stat(filepath.Join(dir, "model.safetensors.index.json"))
+	if errSingle != nil && errSharded != nil {
 		return c
 	}
 	c.Present = true

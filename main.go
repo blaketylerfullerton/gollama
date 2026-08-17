@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -50,7 +49,7 @@ func main() {
 	prompt := flag.String("prompt", "The capital of France is", "prompt to run through the model")
 	tracePath := flag.String("trace", "", "write a trace of the forward pass to this file")
 	noSplash := flag.Bool("no-splash", false, "skip the welcome screen and run straight away")
-	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay (forces attention heads to run sequentially, which costs real throughput)")
+	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay, and show live commit-layer depth in the chat footer (forces attention heads to run sequentially, which costs real throughput)")
 	flag.Parse()
 
 	// The splash goes first, before any checkpoint is touched: it says what
@@ -267,7 +266,7 @@ func setup(dir, prompt string) (*session, error) {
 	if dir == "" {
 		return setupDemo(prompt)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "model.safetensors")); err == nil {
+	if model.HasWeights(dir) {
 		return setupReal(dir, prompt)
 	}
 	return setupDemo(prompt)

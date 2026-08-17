@@ -193,6 +193,27 @@ func TestChatStepsRecordedForHistory(t *testing.T) {
 	}
 }
 
+// While a turn is in flight, the footer surfaces how deep the most recent
+// token's own commit layer was — the one piece of a ChatStep that does reach
+// the screen live, unlike the attention/candidate lists checked above. It
+// disappears again once nothing traced is available (CommitLayer -1, what
+// -trace-chat being off always produces).
+func TestChatFooterShowsLiveCommitLayer(t *testing.T) {
+	c, _, _ := newTestChat(t, "hello")
+	c.Update(ChatStatus(""))
+	c.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	c.Update(ChatStep{Token: "Paris", CommitLayer: 14})
+	if !strings.Contains(c.View(), "layer 14/") {
+		t.Errorf("footer = %q, want it to report the live commit layer", c.footerStatus())
+	}
+
+	c.Update(ChatStep{Token: ".", CommitLayer: -1})
+	if strings.Contains(c.View(), "layer 14/") {
+		t.Error("an untraced step (CommitLayer -1) should clear the footer's commit reading")
+	}
+}
+
 // The stats line has real numbers in it whatever the terminal width, and it
 // must never be the widest thing on screen — see the width guard in stats().
 func TestChatStatsFitsNarrowTerminal(t *testing.T) {

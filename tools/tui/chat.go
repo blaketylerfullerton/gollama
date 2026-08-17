@@ -26,8 +26,11 @@ import (
 // It has no live inspect view of its own anymore — "what did the model attend
 // to" is answered after the fact instead, by stepping through a saved
 // conversation on the past-conversations screen (see history.go). Every
-// ChatStep is still recorded onto its turn for exactly that; nothing here
-// renders one live.
+// ChatStep is still recorded onto its turn for exactly that. The one exception
+// is CommitLayer: the footer status bar reads it straight off the most recent
+// step while a turn is in flight (see footerStatus), since a single number
+// costs nothing to keep half an eye on and doesn't ask for a tab of its own
+// the way the old attention/candidate lists did.
 
 // ChatToken is a slice of generated text as it comes off the model — usually
 // one token, decoded. It's a string rather than an id: this package doesn't
@@ -53,6 +56,11 @@ type ChatStep struct {
 	Token      string
 	Attention  []ChatCandidate // which earlier tokens this one leaned on
 	Candidates []ChatCandidate // what the model ranked highest to come next
+	// CommitLayer is how deep into the stack the model's own eventual pick
+	// first took the lead in the logit lens, or -1 when this step wasn't
+	// traced (the default — see -trace-chat). The footer status bar reads
+	// this live, off the most recent step, while a turn is in flight.
+	CommitLayer int
 }
 
 // ChatDone says the current turn finished — end of sequence, or the token
@@ -133,6 +141,7 @@ type Chat struct {
 	turnStarted  time.Time
 	turnTokens   int
 	lastTurnRate string // "12 tok in 4.1s (2.9 tok/s)", frozen once a turn ends
+	lastCommit   int    // most recent ChatStep.CommitLayer this turn; -1 if none yet (or untraced)
 
 	sessionID string // names this conversation's file under history.Save
 	startedAt time.Time
@@ -199,18 +208,19 @@ func NewChat(label string, arch Arch, dir string, events <-chan tea.Msg, reqs ch
 
 	started := time.Now()
 	return &Chat{
-		label:     label,
-		arch:      arch,
-		dir:       dir,
-		events:    events,
-		reqs:      reqs,
-		phase:     chatLoading,
-		status:    "loading…",
-		sys:       sysinfo.Detect(),
-		input:     in,
-		vp:        viewport.New(0, 0),
-		sessionID: history.NewID(started),
-		startedAt: started,
+		label:      label,
+		arch:       arch,
+		dir:        dir,
+		events:     events,
+		reqs:       reqs,
+		phase:      chatLoading,
+		status:     "loading…",
+		sys:        sysinfo.Detect(),
+		input:      in,
+		vp:         viewport.New(0, 0),
+		sessionID:  history.NewID(started),
+		startedAt:  started,
+		lastCommit: -1,
 	}
 }
 
@@ -271,13 +281,15 @@ func (c *Chat) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return c, waitForChat(c.events)
 
 	case ChatStep:
-		// The chat screen itself has no inspect view anymore — this is kept
-		// only so history.Save has each turn's steps for the past-
-		// conversations screen to step through later.
+		// The chat screen itself has no inspect view anymore — steps are kept
+		// so history.Save has each turn's steps for the past-conversations
+		// screen to step through later. CommitLayer is the one piece read
+		// live, off the most recent step, for the footer status bar.
 		if len(c.turns) > 0 {
 			last := &c.turns[len(c.turns)-1]
 			last.steps = append(last.steps, msg)
 		}
+		c.lastCommit = msg.CommitLayer
 		return c, waitForChat(c.events)
 
 	case ChatDone:
@@ -410,6 +422,7 @@ func (c *Chat) runCommand() tea.Cmd {
 func (c *Chat) clearConversation() tea.Cmd {
 	c.turns = nil
 	c.lastTurnRate = ""
+	c.lastCommit = -1
 	c.err = nil
 	started := time.Now()
 	c.sessionID = history.NewID(started)
@@ -502,6 +515,7 @@ func (c *Chat) submit() tea.Cmd {
 	c.input.Reset()
 	c.phase, c.status, c.err = chatGenerating, "thinking…", nil
 	c.turnStarted, c.turnTokens = time.Now(), 0
+	c.lastCommit = -1
 	c.refresh()
 
 	reqs := c.reqs
@@ -689,32 +703,41 @@ func (c *Chat) layout() {
 	infoHeight := lipgloss.Height(c.infoBox(inner))
 	rows := bodyRows(c.h, bar) - infoHeight - 1 // info box, then a blank line before the panel
 
-	c.input.Width = max(inner-4-lipgloss.Width(c.input.Prompt), 8)
-	// The panel renders at panelStyle.Width(inner-2), and that call's own
-	// padding (4) sits on top of the width it's given rather than inside it —
-	// so the text column inside the border and padding is inner-2-4. See
-	// picker.go's list/mem panels for the same arithmetic.
-	c.vp.Width = inner - 6
-	// rows is the room the panel and everything under it have to share. Four of
-	// those rows aren't viewport: the panel's own top and bottom border, then the
-	// blank line and the input below it. Counting only the last two let the panel
-	// render two rows taller than its budget, and since screen() clips the body
-	// from the bottom, the two rows it pushed off were the blank and the input —
-	// the chat screen lost its input box at every terminal size.
+	// The input box is what carries the border now (see View() and
+	// inputBoxStyle) — border (2) plus its padding (4) is 6 columns of
+	// non-content, the same subtraction the transcript used to make for its
+	// own box. See picker.go's list/mem panels for the same arithmetic.
+	c.input.Width = max(inner-6-lipgloss.Width(c.input.Prompt), 8)
+	// The transcript itself is unboxed now — just its padding (4), no border.
+	c.vp.Width = inner - 4
+	// rows is the room the transcript and everything under it have to share.
+	// Four of those rows aren't viewport: the command hint line, then the
+	// input box's own top border, bottom border, and the input line between
+	// them. Undercounting this let a box render taller than its budget, and
+	// since screen() clips the body from the bottom, the rows it pushed off
+	// were the ones at the very end — the chat screen lost its input box at
+	// every terminal size.
 	c.vp.Height = max(rows-4, 3)
 	c.refresh()
 }
+
+// inputBoxStyle is panelStyle borrowed for the input line instead of the
+// transcript — the box moved from around the conversation to around the one
+// thing you're actively doing on this screen, so what you're mid-sentence in
+// is what's framed, not what you've already said.
+var inputBoxStyle = panelStyle
 
 func (c *Chat) View() string {
 	bar := c.bar()
 	inner := max(c.w-2*screenMargin, minSpecsWidth)
 
-	panel := panelStyle.Width(inner - 2).Height(c.vp.Height).Render(c.vp.View())
+	transcript := lipgloss.NewStyle().Padding(0, 2).Render(c.vp.View())
+	input := inputBoxStyle.Width(inner - 2).Render(c.input.View())
 
 	rows := []string{
 		c.infoBox(inner), "",
-		panel, c.commandHint(inner),
-		c.input.View(),
+		transcript, c.commandHint(inner),
+		input,
 	}
 
 	return screen(c.w, c.h, lipgloss.JoinVertical(lipgloss.Left, rows...), bar)
@@ -732,8 +755,14 @@ func (c *Chat) infoBox(available int) string {
 	// Less the border, which lipgloss draws outside the width it's given — the
 	// panel below does the same subtraction.
 	width := available - 2
+	// Less the panel's own padding too — panelStyle.Width sets the box's
+	// padded interior, so a row's actual text column is 4 narrower than
+	// width. titleRule fills every column it's given with rule or badge, so
+	// handing it the padded width instead of the content width ran the line
+	// 4 columns over and wrapped it.
+	content := width - 4
 	rows := []string{
-		titleStyle.Render("GoLlama"),
+		titleRule(fmt.Sprintf("GoLlama %s", Version), content),
 		valueStyle.Render("Welcome — type anything to chat, or / for commands"),
 		dimStyle.Render("model ") + valueStyle.Render(c.label) +
 			dimStyle.Render("   host ") + valueStyle.Render(c.sys.Host),
@@ -821,11 +850,31 @@ func (c *Chat) bar() string {
 // card at the top that no longer changes underneath you turn to turn.
 func (c *Chat) footerStatus() string {
 	if c.status != "" {
-		return c.status
+		status := c.status
+		if c.phase == chatGenerating {
+			if commit := c.commitLabel(); commit != "" {
+				status += "  ·  " + commit
+			}
+		}
+		return status
 	}
 	status := "resident ~" + sysinfo.Bytes(c.arch.ResidentBytes()) + "  ·  ram " + memPhrase(c.sys)
 	if rate := c.tpsLabel(); rate != "" {
 		status += "  ·  " + rate
 	}
 	return status
+}
+
+// commitLabel is "layer 14/28" — how deep the most recent token needed to go
+// before the model's own logit lens agreed with what it actually picked.
+// Empty unless -trace-chat is on, since that's what makes CommitLayer
+// anything but -1. Kept to a couple of words rather than a fuller phrase:
+// toolbar (see layout.go) drops its whole right side, status text included,
+// the moment it and the key hints together don't fit one row — a longer
+// label would risk taking "thinking…" down with it on an ordinary terminal.
+func (c *Chat) commitLabel() string {
+	if c.lastCommit < 0 || c.arch.NLayer <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("layer %d/%d", c.lastCommit, c.arch.NLayer)
 }

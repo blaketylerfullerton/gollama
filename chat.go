@@ -224,10 +224,31 @@ func emit(ctx context.Context, out chan<- tea.Msg, msg tea.Msg) bool {
 // the model now ranks as likely to come next.
 func chatStep(text string, tr *trace.Trace, seq []int, logits []float32, tok *tokenizer.Tokenizer) tui.ChatStep {
 	return tui.ChatStep{
-		Token:      text,
-		Attention:  attentionSummary(tr, seq, tok),
-		Candidates: candidatesOf(model.TopCandidates(logits, 0.7, chatCandidates), tok),
+		Token:       text,
+		Attention:   attentionSummary(tr, seq, tok),
+		Candidates:  candidatesOf(model.TopCandidates(logits, 0.7, chatCandidates), tok),
+		CommitLayer: commitLayer(tr),
 	}
+}
+
+// commitLayer is the depth at which this pass's own logit lens first landed
+// on the pick its last layer actually makes — for whatever comes after the
+// token just decoded. Early is a foregone conclusion; late is a token the
+// model was still working out most of the way through the stack. -1 when
+// there's no logit-lens trace to read it from, which is always true unless
+// -trace-chat is on.
+func commitLayer(tr *trace.Trace) int {
+	events := tr.Kind(trace.KindLogitLens)
+	if len(events) == 0 {
+		return -1
+	}
+	target := events[0].TargetID
+	for _, e := range events {
+		if len(e.Top) > 0 && e.Top[0].ID == target {
+			return e.Layer
+		}
+	}
+	return -1
 }
 
 // attentionSummary averages every layer and head's attention row into one

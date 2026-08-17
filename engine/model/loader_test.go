@@ -93,6 +93,44 @@ func writeTinyCheckpoint(t *testing.T, dir string, cfg GPTConfig) {
 	}
 }
 
+// HasWeights has to recognise a sharded checkpoint, not just a single
+// model.safetensors — every real Qwen3 above 0.6B ships sharded, and a
+// checker that only looked for the single-file name reported a fully and
+// correctly downloaded checkpoint as though the directory were empty, which
+// sent callers quietly down whatever "no checkpoint" path they had instead
+// of loading the real weights right there on disk.
+func TestHasWeights(t *testing.T) {
+	t.Run("single file", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSafetensors(t, filepath.Join(dir, "model.safetensors"), []stTensor{
+			{"w", "F32", []int{1}, f32Bytes(1)},
+		})
+		if !HasWeights(dir) {
+			t.Error("HasWeights = false for a directory with model.safetensors")
+		}
+	})
+
+	t.Run("sharded", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSafetensors(t, filepath.Join(dir, "model-00001-of-00001.safetensors"), []stTensor{
+			{"w", "F32", []int{1}, f32Bytes(1)},
+		})
+		index := `{"weight_map":{"w":"model-00001-of-00001.safetensors"}}`
+		if err := os.WriteFile(filepath.Join(dir, "model.safetensors.index.json"), []byte(index), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !HasWeights(dir) {
+			t.Error("HasWeights = false for a sharded checkpoint with no single model.safetensors")
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		if HasWeights(t.TempDir()) {
+			t.Error("HasWeights = true for a directory with no weights at all")
+		}
+	})
+}
+
 func TestFromDirectory(t *testing.T) {
 	dir := t.TempDir()
 	cfg := tinyConfig()

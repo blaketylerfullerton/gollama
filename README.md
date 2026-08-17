@@ -57,6 +57,7 @@ The picker is where the memory arithmetic that actually matters happens: every m
  │  ▸ Qwen3-0.6B                                              596M    1.4 GB     ready  recommended │
  │    Qwen3-1.7B                                              1.7B    3.8 GB    get it         fits │
  │    Qwen3-4B                                                4.0B    8.2 GB    get it    too large │
+ │    Qwen3-8B                                                8.2B   15.3 GB    get it    too large │
  │    tiny random model                                         1M         —  built in         fits │
  ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
  ╭────────────────────────────────────────────────────────────╮ ╭────────────────────────────────╮
@@ -70,7 +71,7 @@ The picker is where the memory arithmetic that actually matters happens: every m
 
 Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation `cmd/inspect` uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" from the welcome menu lets you reopen and replay any of them later without reloading a model.
 
-With a checkpoint in `checkpoints/qwen3-0.6b` this is the real 0.6B model; a fresh clone with nothing downloaded yet still has the built-in "tiny random model" entry, so every screen works before you fetch any weights. To get the real ones:
+Pressing enter on one marked "get it" instead fetches it: a progress screen (`tools/hf/`) pulls `config.json`, `tokenizer.json`, and the weights straight off HuggingFace — resuming a shard that's already on disk at the right size rather than restarting it — then drops you into chat the moment it lands. Nothing runs in another terminal. A fresh clone with nothing downloaded yet still has the built-in "tiny random model" entry, so every screen works before you fetch any weights. The equivalent by hand, if you'd rather:
 
 ```bash
 huggingface-cli download Qwen/Qwen3-0.6B --local-dir checkpoints/qwen3-0.6b
@@ -399,7 +400,7 @@ Memory is `NLayer × NKVHead × HeadDim × 2 × 4` bytes per token. For Qwen3-0.
 go test ./...
 ```
 
-151 tests. `-short` skips the ones that read the 1.5GB checkpoint; all of those also skip cleanly when it's absent, so a fresh clone passes.
+200 tests. `-short` skips the ones that read the 1.5GB checkpoint; all of those also skip cleanly when it's absent, so a fresh clone passes.
 
 **The one that matters most is `TestRealCheckpointPredictsParis`.** It asserts that the real model, given `"The capital of France is"`, ranks `" Paris"` first with more than 40% probability. That single assertion covers the rotary sign convention, the QK-norm ordering, the GQA head mapping, and every weight transpose at once — because all of those failure modes produce a flat distribution over nonsense rather than an error. It's the difference between "the code runs" and "the math is right."
 
@@ -488,21 +489,32 @@ tools/
   walkthrough/       the walkthrough Tracer, plus vector/matrix pretty-printers
   trace/             the trace format: events, JSONL writer, in-memory collector,
                      and the tee that fans events out to several consumers
-  tui/               the three-screen flow (bubbletea, lipgloss)
-    flow.go          Start() — wires welcome → picker → about back into a loop
+  tui/               the whole screen flow (bubbletea, lipgloss)
+    root.go          Root — one bubbletea model that owns every screen and
+                     decides which is visible, so a screen can be left rather
+                     than only ever ended
     welcome.go       screen 1: this machine, and what's on disk to run on it
     picker.go        screen 2: every known model, memory cost against this
                      machine, and a fits/recommended/too-large verdict
     catalog.go       the model list itself — names, architectures, what's
                      installed under a checkpoint root
+    download.go      screen: fetches a picked model's weights from HuggingFace
+                     (via tools/hf) and shows live progress, in place of
+                     sending you to another terminal to run huggingface-cli
     chat.go          screen 3: the conversation, plus the inspect tab
     about.go         the "what is GoLlama" page
     history.go       screen: "past conversations" — read-only playback of
                      whatever tools/history has saved
-    layout.go        the frame both screens share: header, toolbar, panels
+    layout.go        the frame every screen shares: header, toolbar, panels
     llama.go         the animated ASCII llama
     wordmark.go      the "GoLlama" title art
-    style.go         shared lipgloss styles and the amber color ramp
+    style.go         shared lipgloss styles built on tools/amber
+  amber/             the palette: one brightness ramp for data (attention
+                     weights, probabilities, memory gauges) kept separate from
+                     the neutral ramp used for chrome — see the package doc
+  hf/                fetches a checkpoint's config/tokenizer/weights straight
+                     from huggingface.co, resuming a partial multi-shard
+                     download instead of restarting it
   history/           persists chat transcripts as JSON, one file per
                      conversation, under ~/.gollama/history
   sysinfo/           what hardware this is about to run on
