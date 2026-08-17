@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
 	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
 	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
@@ -19,6 +20,7 @@ const (
 	viewAttention               // what each head looked at
 	viewAttribution             // which components moved the answer
 	viewStages
+	viewAblation // baseline vs. one head forced to zero
 	numViews
 )
 
@@ -30,8 +32,10 @@ func (v view) String() string {
 		return "attention"
 	case viewAttribution:
 		return "attribution"
-	default:
+	case viewStages:
 		return "stages"
+	default:
+		return "ablation"
 	}
 }
 
@@ -83,6 +87,15 @@ type app struct {
 	layer int
 	head  int
 	w, h  int
+
+	// Ablation. ablateOn is whether the currently selected (layer, head) is
+	// being forced to zero for comparison; ablateSteps holds that shadow
+	// run's steps, index-aligned with steps (ablateSteps[i] is the ablated
+	// version of steps[i]). lastPrompt is what submit() last sent, so the
+	// ablated re-run can resubmit the same text without touching the input.
+	ablateOn    bool
+	ablateSteps []step
+	lastPrompt  string
 }
 
 // newApp builds a file-mode app: one step, nothing to run.
@@ -160,7 +173,17 @@ func (a *app) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, tea.Batch(waitFor(a.events), textinput.Blink)
 
 	case stepMsg:
-		a.addStep(newStep(msg.label, msg.tr))
+		switch {
+		case msg.ablated && a.ablateOn:
+			// A shadow run for comparison, not the baseline being browsed —
+			// append alongside it rather than through addStep, which would
+			// reset the cursor/layer the baseline is currently showing.
+			a.ablateSteps = append(a.ablateSteps, newStep(msg.label, msg.tr))
+		case msg.ablated:
+			// Ablation was toggled off again before this step landed; drop it.
+		default:
+			a.addStep(newStep(msg.label, msg.tr))
+		}
 		a.status = ""
 		return a, waitFor(a.events)
 
@@ -239,6 +262,10 @@ func (a *app) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.view = viewAttribution
 	case "4":
 		a.view = viewStages
+	case "5":
+		a.view = viewAblation
+	case "a":
+		return a, a.toggleAblate()
 	case "up", "k":
 		a.layer = max(0, a.layer-1)
 	case "down", "j":
@@ -276,7 +303,39 @@ func (a *app) submit() tea.Cmd {
 	a.status = "encoding…"
 	a.input.Blur()
 
+	// A fresh prompt invalidates whatever ablation comparison was showing.
+	a.ablateOn = false
+	a.ablateSteps = nil
+	a.lastPrompt = prompt
+
 	req := request{prompt: prompt, maxTokens: a.maxTokens}
+	return func() tea.Msg {
+		a.reqs <- req
+		return nil
+	}
+}
+
+// toggleAblate turns ablation of the currently selected (layer, head) on or
+// off. Turning it on fires a fresh request with that head forced to zero, so
+// viewAblation has a shadow run to compare against the baseline already on
+// screen; turning it off just drops that shadow run.
+func (a *app) toggleAblate() tea.Cmd {
+	if a.ablateOn {
+		a.ablateOn = false
+		a.ablateSteps = nil
+		return nil
+	}
+	if !a.live() || a.lastPrompt == "" || a.reqs == nil {
+		return nil
+	}
+	a.ablateOn = true
+	a.ablateSteps = nil
+
+	req := request{
+		prompt:    a.lastPrompt,
+		maxTokens: a.maxTokens,
+		ablate:    []model.HeadRef{{Layer: a.layer, Head: a.head}},
+	}
 	return func() tea.Msg {
 		a.reqs <- req
 		return nil
@@ -302,6 +361,8 @@ func (a *app) View() string {
 		body = a.attributionView()
 	case viewStages:
 		body = a.stagesView()
+	case viewAblation:
+		body = a.ablationView()
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, a.header(), body, a.footer())
 }
@@ -411,7 +472,7 @@ func (a *app) footer() string {
 			keys = append(keys, "n/p step")
 		}
 		if a.live() {
-			keys = append(keys, "i prompt")
+			keys = append(keys, "a ablate head", "i prompt")
 		}
 		keys = append(keys, "q quit")
 	}

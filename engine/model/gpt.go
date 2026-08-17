@@ -46,6 +46,21 @@ type pass struct {
 	// the pass is about.
 	wantWrites bool
 	writes     []residualWrite
+
+	// ablate lists query heads whose output is forced to zero before it's
+	// merged into the residual stream — see HeadRef and Attention.Forward.
+	// Empty for a normal pass.
+	ablate []HeadRef
+}
+
+// ablated reports whether head h of the current layer should be silenced.
+func (p *pass) ablated(h int) bool {
+	for _, r := range p.ablate {
+		if r.Layer == p.layer && r.Head == h {
+			return true
+		}
+	}
+	return false
 }
 
 // residualWrite is one component's additive contribution to the residual
@@ -90,7 +105,7 @@ func (p *pass) layerKV(nKVHead, T int) *LayerKV {
 // projects every position through the LM head. Generation doesn't use it, but
 // it stays as the reference ForwardCached is checked against.
 func (g *GPT) Forward(ids []int) [][]float32 {
-	p := g.newPass(nil, 0, len(ids))
+	p := g.newPass(nil, 0, len(ids), nil)
 	x := g.stack(ids, p)
 
 	logits := MatMul(x, g.LMHead)
@@ -106,6 +121,15 @@ func (g *GPT) Forward(ids []int) [][]float32 {
 // LM head — at 155.6M parameters, the single largest matmul in the model — runs
 // on one row instead of every row.
 func (g *GPT) ForwardCached(ids []int, cache *KVCache) ([]float32, error) {
+	return g.ForwardCachedAblated(ids, cache, nil)
+}
+
+// ForwardCachedAblated is ForwardCached with a set of attention heads forced
+// to contribute nothing to the residual stream — the mechanism behind head
+// ablation experiments (see HeadRef). ForwardCached is this with an empty
+// ablate set, which costs nothing extra: pass.ablated short-circuits on a nil
+// slice the same way normal inference always has.
+func (g *GPT) ForwardCachedAblated(ids []int, cache *KVCache, ablate []HeadRef) ([]float32, error) {
 	if cache == nil {
 		return nil, fmt.Errorf("forward: cache is nil, use Forward for an uncached pass")
 	}
@@ -122,7 +146,7 @@ func (g *GPT) ForwardCached(ids []int, cache *KVCache) ([]float32, error) {
 	}
 
 	offset := cache.Len()
-	p := g.newPass(cache, offset, offset+len(ids))
+	p := g.newPass(cache, offset, offset+len(ids), ablate)
 	x := g.stack(ids, p)
 	cache.n += len(ids)
 
@@ -133,13 +157,14 @@ func (g *GPT) ForwardCached(ids []int, cache *KVCache) ([]float32, error) {
 	return logits[0], nil
 }
 
-func (g *GPT) newPass(cache *KVCache, offset, need int) *pass {
+func (g *GPT) newPass(cache *KVCache, offset, need int, ablate []HeadRef) *pass {
 	g.ensureRotary(need)
 	tr := Trace{Out: g.Trace, Layer: -1}
 	return &pass{
 		cos: g.cos, sin: g.sin,
 		cache: cache, offset: offset, layer: -1,
 		tr: tr, wantWrites: tr.attrib() != nil,
+		ablate: ablate,
 	}
 }
 

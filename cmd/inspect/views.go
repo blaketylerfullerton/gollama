@@ -338,6 +338,91 @@ func signedBar(v, scale float64, half int) string {
 	return gap + rule + fill + strings.Repeat(" ", half-n)
 }
 
+// --- ablation -----------------------------------------------------------------
+
+// ablationView compares the baseline run against a shadow run with the
+// selected head's output forced to zero, layer by layer. It answers the
+// question attribution can only guess at: does this head actually change the
+// answer, or just look busy?
+func (a *app) ablationView() string {
+	if len(a.steps) == 0 {
+		return ""
+	}
+	base := a.steps[a.cur]
+	if a.cur >= len(a.ablateSteps) {
+		return dimStyle.Render(
+			"  No ablation run yet.\n" +
+				"  Select a layer and head (arrows), then press 'a' to force it to\n" +
+				"  zero and compare its logit lens against this baseline.")
+	}
+	abl := a.ablateSteps[a.cur]
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("  ablating layer %s head %s\n\n",
+		keyStyle.Render(fmt.Sprint(a.layer)), keyStyle.Render(fmt.Sprint(a.head))))
+	b.WriteString(headerRowStyle.Render(fmt.Sprintf("  %-5s %-14s %7s   %-14s %7s   %s",
+		"layer", "baseline", "prob", "ablated", "prob", "Δ baseline's pick")) + "\n")
+
+	firstDiverge := -1
+	n := min(len(base.lens), len(abl.lens))
+	lo, hi := window(n, a.layer, a.bodyHeight()-1)
+	for i := lo; i < hi; i++ {
+		be, ae := base.lens[i], abl.lens[i]
+		if len(be.Top) == 0 || len(ae.Top) == 0 {
+			continue
+		}
+		bt, at := be.Top[0], ae.Top[0]
+		if firstDiverge < 0 && bt.ID != at.ID {
+			firstDiverge = be.Layer
+		}
+
+		// How much probability the ablated run still gives baseline's own top
+		// pick — zero if it fell out of the ablated run's top-k entirely,
+		// which is itself a meaningful answer (the head mattered a lot).
+		var ablatedBaseProb float64
+		for _, c := range ae.Top {
+			if c.ID == bt.ID {
+				ablatedBaseProb = c.Prob
+				break
+			}
+		}
+		delta := ablatedBaseProb - bt.Prob
+
+		label := fmt.Sprintf("%d", be.Layer)
+		if be.Layer >= base.tr.Header.Config.NLayer {
+			label = "out"
+		}
+
+		row := fmt.Sprintf("  %-5s %-14s %6.1f%%   %-14s %6.1f%%   %s",
+			label, truncate(fmt.Sprintf("%q", bt.Text), 14), bt.Prob*100,
+			truncate(fmt.Sprintf("%q", at.Text), 14), at.Prob*100,
+			signedBar(delta, 1, 10))
+
+		switch {
+		case be.Layer == a.layer:
+			b.WriteString(selStyle.Render(row))
+		case be.Layer == firstDiverge:
+			b.WriteString(hotStyle.Render(row))
+		default:
+			b.WriteString(row)
+		}
+		b.WriteString("\n")
+	}
+
+	switch {
+	case firstDiverge < 0:
+		b.WriteString("\n" + dimStyle.Render(
+			"  top prediction never changes — this head doesn't look causally load-bearing here"))
+	case firstDiverge >= base.tr.Header.Config.NLayer:
+		b.WriteString("\n" + dimStyle.Render(
+			"  only the final output changes — every intermediate layer still agrees"))
+	default:
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf(
+			"  the top prediction first changes at layer %d (highlighted)", firstDiverge)))
+	}
+	return b.String()
+}
+
 // --- stages -----------------------------------------------------------------
 
 func (a *app) stagesView() string {

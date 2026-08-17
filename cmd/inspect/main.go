@@ -17,10 +17,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
 	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
@@ -36,8 +36,9 @@ func main() {
 			"usage: inspect [-model dir] [-prompt text] [-n tokens]\n"+
 				"       inspect -f trace.jsonl\n\n"+
 				"Type a prompt and press enter to run it.\n"+
-				"Keys: 1/2/3 or tab switch view · up/down layer · left/right head\n"+
-				"      n/p step between generated tokens · i edit prompt · q quit\n\n")
+				"Keys: 1-5 or tab switch view · up/down layer · left/right head\n"+
+				"      n/p step between generated tokens · a ablate the selected head\n"+
+				"      i edit prompt · q quit\n\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -71,7 +72,7 @@ func build(file, checkpoint, prompt string, n int) (*app, error) {
 		return newApp(tr), nil
 	}
 
-	if _, err := os.Stat(filepath.Join(checkpoint, "model.safetensors")); err != nil {
+	if !model.HasWeights(checkpoint) {
 		return nil, fmt.Errorf("no checkpoint at %s\n\n"+
 			"  download one:  huggingface-cli download Qwen/Qwen3-0.6B --local-dir %s\n"+
 			"  or replay a recorded trace:  inspect -f run.jsonl",

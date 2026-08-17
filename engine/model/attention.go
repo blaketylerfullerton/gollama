@@ -6,6 +6,14 @@ import (
 	"sync"
 )
 
+// HeadRef identifies one query attention head to ablate: force its output to
+// zero before it's merged back into the residual stream. Layer and Head are
+// both zero-based; Head is a query-head index (0..NHead-1), not a kv-head
+// index — under GQA several query heads share one kv head, but ablation only
+// ever silences one query head's own output slice, so no GQA-aware
+// translation is needed.
+type HeadRef struct{ Layer, Head int }
+
 // Attention is one grouped-query attention layer. Under GQA the q projection
 // is NHead*HeadDim wide but k and v are only NKVHead*HeadDim — several query
 // heads read the same kv head, which is what shrinks the KV cache.
@@ -197,6 +205,11 @@ func attentionHead(a *Attention, h, groupSize int, q [][]float32, store *LayerKV
 
 	headOut, w := CausalAttention(qh, store.K[kv], store.V[kv], p.offset)
 	allWeights[h] = w
+	if p.ablated(h) {
+		// Leave this head's slice of out at its zero-allocated default: zero
+		// in, zero out of Wo, for this head only.
+		return
+	}
 	for t := 0; t < T; t++ {
 		copy(out[t][lo:lo+a.HeadDim], headOut[t])
 	}

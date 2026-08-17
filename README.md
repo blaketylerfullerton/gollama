@@ -206,7 +206,25 @@ The attention view shows the sink getting dramatic with depth — at layer 27, t
   token 0 absorbs 94% of later positions' attention on average
 ```
 
-Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `1`–`4` jump to a view, `g`/`G` first/last layer, `q` quit.
+Attribution and the attention grid are both still just *watching* the forward pass. **Ablation** is the one view that intervenes: pick a head, force its output to zero before it's merged back into the residual stream, and re-run — if the answer actually moves, the head mattered; if it doesn't, whatever attribution measured wasn't load-bearing. Forcing each of the 448 `(layer, head)` pairs in Qwen3-0.6B to zero, one at a time, on `"The capital of France is"`, exactly one of them flips the top prediction away from `" Paris"` — layer 0, head 3:
+
+```text
+  layer   baseline           prob    ablated L0H3       prob
+  0       " only"           18.1%    " only"            26.4%
+  2       " not"            22.8%    " the"             12.0%
+  5       " not"            16.3%    " a"               42.0%
+  7       " a"              54.8%    ","                38.1%
+  12      " a"              20.7%    ","                28.3%
+  17      "____"            76.6%    ","                23.1%
+  20      "____"            55.9%    " a"               38.1%
+  22      " Paris"          55.1%    " a"               31.7%
+  25      " Paris"          96.4%    " a"               19.5%
+  27      " Paris"          65.7%    " a"               12.4%
+```
+
+The two runs already disagree by layer 2 — long before the baseline commits to " Paris" at layer 22 — so this head is doing something far upstream of where attribution said the decision happens, and the model never recovers " Paris" once it's gone. `cmd/inspect`'s fifth tab (`5`) shows this comparison live: pick a layer and head with the arrow keys, press `a` to ablate it, and see which layer the two runs first disagree at.
+
+Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `1`–`5` jump to a view, `a` ablate the selected head, `g`/`G` first/last layer, `q` quit.
 
 Stepping between tokens is where it gets interesting. On `"The capital of France is"` the answer lands at layer 22. On the *next* token — after "…is Paris." — the model predicts `" The"`, and that one settles by layer 19. Different tokens are decided at different depths.
 

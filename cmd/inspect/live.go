@@ -23,8 +23,9 @@ type (
 	}
 	// stepMsg is one completed traced pass: the prefill, or one generated token.
 	stepMsg struct {
-		label string
-		tr    *trace.Trace
+		label   string
+		tr      *trace.Trace
+		ablated bool // true when this step came from a request with ablate set
 	}
 	// runDoneMsg says a whole prompt finished, so the UI can go back to
 	// browsing.
@@ -37,6 +38,10 @@ type (
 type request struct {
 	prompt    string
 	maxTokens int
+	// ablate, when non-empty, forces the listed attention heads' output to
+	// zero for the whole run — see model.HeadRef. Nil is a normal baseline
+	// run.
+	ablate []model.HeadRef
 }
 
 // waitFor turns the next message off a channel into a bubbletea command. It has
@@ -118,12 +123,12 @@ func runPrompt(gpt *model.GPT, tok *tokenizer.Tokenizer, req request, out chan<-
 	// triangle, which is the view worth looking at.
 	out <- statusMsg("prefill…")
 	cache := model.NewKVCache(cfg)
-	logits, err := gpt.ForwardCached(ids, cache)
+	logits, err := gpt.ForwardCachedAblated(ids, cache, req.ablate)
 	if err != nil {
 		return err
 	}
 	collector.LogitLens(cfg.NLayer, logits, model.Argmax(logits)) // the real output, for comparison
-	out <- stepMsg{label: "prefill", tr: collector.Snapshot()}
+	out <- stepMsg{label: "prefill", tr: collector.Snapshot(), ablated: len(req.ablate) > 0}
 
 	// Decode: one token at a time, each with its own trace. That's what makes
 	// "how did the model arrive at *this* token" a navigable axis.
@@ -145,12 +150,12 @@ func runPrompt(gpt *model.GPT, tok *tokenizer.Tokenizer, req request, out chan<-
 		// extends.
 		collector.Trace().Header.Tokens = tokensOf(seq, tok)
 
-		logits, err = gpt.ForwardCached([]int{next}, cache)
+		logits, err = gpt.ForwardCachedAblated([]int{next}, cache, req.ablate)
 		if err != nil {
 			return err
 		}
 		collector.LogitLens(cfg.NLayer, logits, model.Argmax(logits))
-		out <- stepMsg{label: text, tr: collector.Snapshot()}
+		out <- stepMsg{label: text, tr: collector.Snapshot(), ablated: len(req.ablate) > 0}
 	}
 	return nil
 }
