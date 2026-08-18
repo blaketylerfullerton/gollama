@@ -49,23 +49,37 @@ func main() {
 	prompt := flag.String("prompt", "The capital of France is", "prompt to run through the model")
 	tracePath := flag.String("trace", "", "write a trace of the forward pass to this file")
 	noSplash := flag.Bool("no-splash", false, "skip the welcome screen and run straight away")
-	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay, and show live commit-layer depth in the chat footer (forces attention heads to run sequentially, which costs real throughput)")
+	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay, and show live commit-layer depth in the chat footer; the inspect tools always trace, this only affects Chat (forces attention heads to run sequentially, which costs real throughput)")
+	replayFile := flag.String("f", "", "replay a trace file in the inspect screen instead of running a model — needs no checkpoint")
 	flag.Parse()
 
+	// -f needs no checkpoint and none of the other screens: it opens straight
+	// into the inspect screen on a trace already captured (by -trace, on an
+	// earlier run), same as `inspect -f` used to before cmd/inspect merged
+	// into this binary.
+	if *replayFile != "" {
+		if err := tui.StartInspectFile(*replayFile); err != nil {
+			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// The splash goes first, before any checkpoint is touched: it says what
-	// hardware this is about to run on, then asks which model to put on it and
-	// shows what that costs in memory. Both are worth knowing before a
-	// multi-second load. It's skipped when stdout isn't a terminal so piping
-	// still works, and skipped with -no-splash, in which case the default
-	// checkpoint is used if it's there.
+	// hardware this is about to run on, then asks which tool to open and which
+	// model to put on it, and shows what that costs in memory. Both are worth
+	// knowing before a multi-second load. It's skipped when stdout isn't a
+	// terminal so piping still works, and skipped with -no-splash, in which
+	// case the default checkpoint is used if it's there.
 	//
-	// Every screen — splash, picker, about, history, chat — runs inside this one
-	// call now, on one alternate screen. chatEngine is the only thing tui can't
-	// do for itself: it's what turns a typed line into generated tokens, and
-	// package tui deliberately knows nothing about a model.
+	// Every screen — splash, picker, about, history, chat, inspect — runs
+	// inside this one call now, on one alternate screen. newChatEngine and
+	// newInspectEngine are the only things tui can't do for itself: they're
+	// what turn a typed line, or a prompt to trace, into a running model, and
+	// package tui deliberately knows nothing about one.
 	interactive := !*noSplash && isTerminal(os.Stdout)
 	if interactive {
-		if err := tui.Start(checkpointDir, *prompt, newChatEngine(*traceChat)); err != nil {
+		if err := tui.Start(checkpointDir, *prompt, newChatEngine(*traceChat), newInspectEngine()); err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}
@@ -195,7 +209,7 @@ func run(s *session, verbose bool, tracePath string) error {
 	}
 	if !verbose {
 		fmt.Println("\n-v for the layer-by-layer walkthrough · " +
-			"go run ./cmd/inspect to explore interactively")
+			"go run . to pick a tool (Ablation, Attention, Attribution, Logit Lens) and explore interactively")
 	}
 	return nil
 }

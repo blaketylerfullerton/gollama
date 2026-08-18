@@ -2,11 +2,13 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/blaketylerfullerton/GoLlama/tools/sysinfo"
+	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
 // Root is the whole program: one bubbletea model that owns every screen and
@@ -33,6 +35,7 @@ type Root struct {
 	prompt        string // the -prompt flag, prefilled into the chat input
 	sys           sysinfo.Info
 	engine        Engine
+	inspectEngine InspectEngine
 
 	at       screenID
 	welcome  *Welcome
@@ -41,11 +44,19 @@ type Root struct {
 	history  *History
 	download *Download
 	chat     *Chat
+	inspect  *Inspect
 
 	// chatStop ends the engine goroutine behind the chat screen. Held here
 	// rather than on the Chat, because it has to outlive the screen by exactly
 	// as long as it takes to cancel it — see closeChat.
 	chatStop context.CancelFunc
+	// inspectStop is chatStop's counterpart for the inspect screen.
+	inspectStop context.CancelFunc
+
+	// pendingTool is which tool the welcome menu picked, read once the picker
+	// resolves — the same Picker screen now serves both Chat and Inspect, so
+	// something has to remember which of them a model was picked for.
+	pendingTool Tool
 
 	w, h int
 }
@@ -72,6 +83,7 @@ const (
 	atHistory
 	atDownload
 	atChat
+	atInspect
 )
 
 // doneMsg is how a child says it has finished with itself. It replaces the
@@ -87,7 +99,7 @@ func done() tea.Msg { return doneMsg{} }
 // detected once here and handed to every screen that needs it: detection shells
 // out to sysctl and vm_stat, and repeating that per screen was a visible pause
 // for numbers that cannot have changed.
-func NewRoot(checkpointDir, prompt string, engine Engine) *Root {
+func NewRoot(checkpointDir, prompt string, engine Engine, inspectEngine InspectEngine) *Root {
 	sys := sysinfo.Detect()
 	return &Root{
 		checkpointDir: checkpointDir,
@@ -95,6 +107,7 @@ func NewRoot(checkpointDir, prompt string, engine Engine) *Root {
 		prompt:        prompt,
 		sys:           sys,
 		engine:        engine,
+		inspectEngine: inspectEngine,
 		at:            atWelcome,
 		welcome:       NewWelcomeFor(sys, checkpointDir),
 	}
@@ -102,12 +115,34 @@ func NewRoot(checkpointDir, prompt string, engine Engine) *Root {
 
 // Start puts the whole program on one alternate screen and returns when the user
 // leaves it.
-func Start(checkpointDir, prompt string, engine Engine) error {
-	_, err := tea.NewProgram(NewRoot(checkpointDir, prompt, engine), tea.WithAltScreen()).Run()
+func Start(checkpointDir, prompt string, engine Engine, inspectEngine InspectEngine) error {
+	_, err := tea.NewProgram(NewRoot(checkpointDir, prompt, engine, inspectEngine), tea.WithAltScreen()).Run()
 	return err
 }
 
-func (r *Root) Init() tea.Cmd { return r.welcome.Init() }
+// StartInspectFile puts the inspect screen alone on one alternate screen,
+// replaying a trace file rather than running a model — the merged binary's
+// equivalent of what used to be `inspect -f trace.jsonl` as its own program.
+// There is no welcome screen, no picker, and nothing behind this one to back
+// out to: esc/InspectBack falls straight through to quitting, same as any
+// other screen's Quit outcome.
+func StartInspectFile(path string) error {
+	tr, err := trace.Open(path)
+	if err != nil {
+		return err
+	}
+	if len(tr.Events) == 0 {
+		return fmt.Errorf("%s has a header but no events", path)
+	}
+	r := &Root{at: atInspect, inspect: NewInspectFile(tr)}
+	_, err = tea.NewProgram(r, tea.WithAltScreen()).Run()
+	return err
+}
+
+// Init starts whichever screen is current. Ordinarily that's the welcome
+// screen, but StartInspectFile's Root opens directly on atInspect with no
+// welcome screen at all, so this reads r.at rather than assuming.
+func (r *Root) Init() tea.Cmd { return r.current().Init() }
 
 func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// The size is remembered rather than only forwarded, so a screen opened
@@ -123,9 +158,10 @@ func (r *Root) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (r *Root) View() string { return r.current().View() }
 
-// current is the visible child. Chat is the one that can be absent — it only
-// exists while there's an engine behind it — so a message arriving after it was
-// closed falls back to the screen that replaced it rather than panicking.
+// current is the visible child. Chat and Inspect are the ones that can be
+// absent — they only exist while there's an engine behind them — so a message
+// arriving after one was closed falls back to the screen that replaced it
+// rather than panicking.
 func (r *Root) current() tea.Model {
 	switch r.at {
 	case atPicker:
@@ -140,8 +176,18 @@ func (r *Root) current() tea.Model {
 		if r.chat != nil {
 			return r.chat
 		}
+	case atInspect:
+		if r.inspect != nil {
+			return r.inspect
+		}
 	}
-	return r.welcome
+	if r.welcome != nil {
+		return r.welcome
+	}
+	// Only reached by StartInspectFile's Root, which has no welcome screen at
+	// all — the inspect screen it built at construction is the only child
+	// that ever exists in that mode.
+	return r.inspect
 }
 
 // forward hands a message to the visible child. Everything a screen already
@@ -161,6 +207,10 @@ func (r *Root) advance() tea.Cmd {
 	case atWelcome:
 		switch r.welcome.Choice() {
 		case Run:
+			// Remembered here, read once the picker resolves: the same
+			// picker now serves every tool, so nothing else says which one a
+			// model is being chosen for.
+			r.pendingTool = r.welcome.Tool()
 			return r.show(atPicker)
 		case ShowAbout:
 			return r.show(atAbout)
@@ -175,7 +225,10 @@ func (r *Root) advance() tea.Cmd {
 			if !m.Installed && !m.Demo {
 				return r.openDownload(m)
 			}
-			return r.openChat(m)
+			if r.pendingTool == ToolChat {
+				return r.openChat(m)
+			}
+			return r.openInspect(m, r.pendingTool)
 		case Back:
 			return r.show(atWelcome)
 		}
@@ -190,7 +243,11 @@ func (r *Root) advance() tea.Cmd {
 			// truth about its shape rather than the built-in guess picker.go
 			// used to describe it before it existed anywhere.
 			r.picker = NewPicker(r.root, r.sys)
-			return r.openChat(findModel(r.picker.models, m.Dir, m))
+			found := findModel(r.picker.models, m.Dir, m)
+			if r.pendingTool == ToolChat {
+				return r.openChat(found)
+			}
+			return r.openInspect(found, r.pendingTool)
 		case DownloadFailed:
 			err := r.download.Err()
 			r.download = nil
@@ -220,6 +277,15 @@ func (r *Root) advance() tea.Cmd {
 			// Back to the picker rather than the welcome menu: the question chat
 			// leaves you with is "run a different one", and that's the screen
 			// that answers it — with the cursor still on what you just ran.
+			return r.show(atPicker)
+		}
+
+	case atInspect:
+		back := r.inspect.Outcome() == InspectBack
+		r.closeInspect()
+		// r.picker is nil under StartInspectFile's Root: there's no picker,
+		// or anything else, behind a replayed trace file to go back to.
+		if back && r.picker != nil {
 			return r.show(atPicker)
 		}
 	}
@@ -327,6 +393,31 @@ func (r *Root) closeChat() {
 		r.chatStop = nil
 	}
 	r.chat = nil
+}
+
+// openInspect starts an inspect engine for m and shows it, defaulted to
+// whichever view tool maps to (see toolInitialView) — structurally the same
+// as openChat, just for the other kind of engine.
+func (r *Root) openInspect(m Model, tool Tool) tea.Cmd {
+	ctx, stop := context.WithCancel(context.Background())
+	events := make(chan tea.Msg)
+	reqs := make(chan InspectRequest, 1)
+	go r.inspectEngine(ctx, m.Dir, reqs, events)
+
+	r.inspectStop = stop
+	r.inspect = NewInspectLive(events, reqs, r.prompt, 3, toolInitialView(tool))
+	r.at = atInspect
+	return tea.Batch(r.inspect.Init(), r.sizeCurrent())
+}
+
+// closeInspect ends the engine behind the inspect screen on the way out of
+// it — chatStop's counterpart, same reasoning.
+func (r *Root) closeInspect() {
+	if r.inspectStop != nil {
+		r.inspectStop()
+		r.inspectStop = nil
+	}
+	r.inspect = nil
 }
 
 // sizeCurrent tells the visible screen how big the terminal is, synchronously,

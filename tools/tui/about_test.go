@@ -44,7 +44,7 @@ func TestAboutShowsItsProse(t *testing.T) {
 	a := NewAbout()
 	a.Update(tea.WindowSizeMsg{Width: 100, Height: 34})
 	view := a.View()
-	for _, want := range []string{"GoLlama", "scalar Go", "cmd/inspect"} {
+	for _, want := range []string{"GoLlama", "scalar Go", "Ablation"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}

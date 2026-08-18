@@ -148,13 +148,12 @@ func TestWelcomeEscDoesNotQuit(t *testing.T) {
 	}
 }
 
-// The menu opens on "select a model" — that's the common case, and pressing
-// enter without touching an arrow key should do the thing most people came
-// here for, not the about page.
-func TestWelcomeOpensOnSelectAModel(t *testing.T) {
+// The menu opens on Ablation — that's the headline feature, and pressing
+// enter without touching an arrow key should lead straight to it.
+func TestWelcomeOpensOnAblation(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	if w.cursor != 0 {
-		t.Errorf("cursor = %d, want 0 (select a model)", w.cursor)
+		t.Errorf("cursor = %d, want 0 (Ablation)", w.cursor)
 	}
 	_, cmd := w.Update(key("enter"))
 	if cmd == nil {
@@ -163,26 +162,66 @@ func TestWelcomeOpensOnSelectAModel(t *testing.T) {
 	if w.Choice() != Run {
 		t.Errorf("Choice() = %v, want Run", w.Choice())
 	}
+	if w.Tool() != ToolAblation {
+		t.Errorf("Tool() = %v, want ToolAblation", w.Tool())
+	}
 }
 
-// Moving down to the second row and pressing enter has to lead to the about
-// page, not fall through to Run — the whole point of the row.
-func TestWelcomeSelectsAbout(t *testing.T) {
+// Every row is a tool now, and enter always means Run — Tool() is what tells
+// them apart, not Choice().
+func TestWelcomeEveryRowPicksATool(t *testing.T) {
+	want := []Tool{ToolAblation, ToolAttention, ToolAttribution, ToolLens, ToolChat}
+	if len(want) != len(menuItems) {
+		t.Fatalf("test covers %d rows, menu has %d", len(want), len(menuItems))
+	}
+	for i, tool := range want {
+		w := NewWelcome(t.TempDir())
+		for range i {
+			w.Update(key("j"))
+		}
+		if w.cursor != i {
+			t.Fatalf("cursor = %d after %d downs, want %d", w.cursor, i, i)
+		}
+		_, cmd := w.Update(key("enter"))
+		if cmd == nil {
+			t.Fatalf("row %d: enter did not end the screen", i)
+		}
+		if w.Choice() != Run {
+			t.Errorf("row %d: Choice() = %v, want Run", i, w.Choice())
+		}
+		if w.Tool() != tool {
+			t.Errorf("row %d: Tool() = %v, want %v", i, w.Tool(), tool)
+		}
+	}
+}
+
+// About and history are footer keys now, not cursor rows — pressing them
+// works the same regardless of which tool is highlighted.
+func TestWelcomeAboutKeyIgnoresCursor(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	w.Update(key("j"))
-	if w.cursor != 1 {
-		t.Fatalf("cursor = %d after down, want 1", w.cursor)
-	}
-	_, cmd := w.Update(key("enter"))
+	w.Update(key("j"))
+	_, cmd := w.Update(key("a"))
 	if cmd == nil {
-		t.Fatal("enter did not end the screen")
+		t.Fatal("a did not end the screen")
 	}
 	if w.Choice() != ShowAbout {
 		t.Errorf("Choice() = %v, want ShowAbout", w.Choice())
 	}
 }
 
-// Two rows, no wrapping — same reasoning as the picker's list: one press too
+func TestWelcomeHistoryKey(t *testing.T) {
+	w := NewWelcome(t.TempDir())
+	_, cmd := w.Update(key("h"))
+	if cmd == nil {
+		t.Fatal("h did not end the screen")
+	}
+	if w.Choice() != ShowHistory {
+		t.Errorf("Choice() = %v, want ShowHistory", w.Choice())
+	}
+}
+
+// Five rows, no wrapping — same reasoning as the picker's list: one press too
 // many past either end should not silently jump to the other end.
 func TestWelcomeCursorDoesNotWrap(t *testing.T) {
 	w := NewWelcome(t.TempDir())
@@ -199,11 +238,18 @@ func TestWelcomeCursorDoesNotWrap(t *testing.T) {
 }
 
 // The whole point of the menu is that each row explains what pressing enter
-// on it leads to — the machine specs for the first, a teaser for the second.
+// on it leads to — Ablation's blurb by default, Attention's once highlighted.
+//
+// Resized taller than NewWelcome's own default: five tool rows plus the
+// weights line folded into the machine panel is more content than fits a bare
+// 32-row terminal alongside a detail panel too, the same reason
+// TestViewFitsNarrowTerminal exercises its own explicit sizes rather than
+// relying on the default.
 func TestWelcomeShowsBothMenuRows(t *testing.T) {
 	w := NewWelcome(t.TempDir())
+	w.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	view := w.View()
-	for _, want := range []string{"select a model", "what is GoLlama", "This machine"} {
+	for _, want := range []string{"Ablation", "Attention", "This machine"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}
@@ -211,8 +257,11 @@ func TestWelcomeShowsBothMenuRows(t *testing.T) {
 
 	w.Update(key("j"))
 	view = w.View()
-	if !strings.Contains(view, "What is GoLlama") || !strings.Contains(view, "GoLlama is a") {
-		t.Error("highlighting \"what is GoLlama\" did not show its teaser")
+	// "magnitude" rather than a longer phrase from the blurb: word-wrap in
+	// the panel can legitimately split a phrase across lines at some widths,
+	// and this test cares that the teaser rendered, not exactly how it wrapped.
+	if !strings.Contains(view, "Attention") || !strings.Contains(view, "magnitude") {
+		t.Error("highlighting \"Attention\" did not show its teaser")
 	}
 }
 
@@ -248,13 +297,17 @@ func TestViewFitsNarrowTerminal(t *testing.T) {
 func TestViewShowsHardware(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	view := w.View()
-	for _, want := range []string{"This machine", "cores", "memory", "platform", "Weights"} {
+	for _, want := range []string{"This machine", "cores", "memory", "platform", "weights"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}
 	}
 }
 
+// key builds the tea.KeyMsg for s, shared by every test in this package —
+// including inspect_test.go's, which is why it also knows the arrow keys and
+// tab: welcome's own tests never need them, but reaching for a second,
+// near-identical helper there just to cover a few more cases wasn't worth it.
 func key(s string) tea.KeyMsg {
 	switch s {
 	case "enter":
@@ -265,6 +318,16 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyCtrlC}
 	case " ":
 		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
+	case "up":
+		return tea.KeyMsg{Type: tea.KeyUp}
+	case "down":
+		return tea.KeyMsg{Type: tea.KeyDown}
+	case "left":
+		return tea.KeyMsg{Type: tea.KeyLeft}
+	case "right":
+		return tea.KeyMsg{Type: tea.KeyRight}
+	case "tab":
+		return tea.KeyMsg{Type: tea.KeyTab}
 	default:
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
 	}

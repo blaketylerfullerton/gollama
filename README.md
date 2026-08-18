@@ -13,7 +13,7 @@ This is purely to help me understand inference and transformers better.
 
 Not optimal at all, just for learning. Meant to be a hackable, super simple project for understanding how LLM inference works from first principles.
 
-Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tools/` and `cmd/inspect`). Nothing under `engine/` imports either.
+Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tools/tui`). Nothing under `engine/` imports either.
 
 ## Running it
 
@@ -69,7 +69,7 @@ The picker is where the memory arithmetic that actually matters happens: every m
  ╰──────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
 ```
 
-Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation `cmd/inspect` uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" from the welcome menu lets you reopen and replay any of them later without reloading a model.
+Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation the inspect screen (below) uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" (`h` on the welcome menu) lets you reopen and replay any of them later without reloading a model.
 
 Pressing enter on one marked "get it" instead fetches it: a progress screen (`tools/hf/`) pulls `config.json`, `tokenizer.json`, and the weights straight off HuggingFace — resuming a shard that's already on disk at the right size rather than restarting it — then drops you into chat the moment it lands. Nothing runs in another terminal. A fresh clone with nothing downloaded yet still has the built-in "tiny random model" entry, so every screen works before you fetch any weights. The equivalent by hand, if you'd rather:
 
@@ -120,10 +120,10 @@ attention weights — layer 0, head 0 (each row attends across the columns)
 ## Inspecting a run
 
 ```bash
-go run ./cmd/inspect
+go run .
 ```
 
-An interactive TUI: it loads the checkpoint once, then you **type a prompt and press enter**. It traces a prefill pass plus one pass per generated token, streaming each into the UI as it completes. Edit and run again with `i` — the model stays loaded.
+Pick a tool from the welcome menu — **Ablation**, Attention, Attribution, or Logit Lens — then a model, same as picking Chat. All four open the same inspect screen, just defaulted to a different tab; it loads the checkpoint once, then you **type a prompt and press enter**. It traces a prefill pass plus one pass per generated token, streaming each into the UI as it completes. Edit and run again with `i` — the model stays loaded.
 
 While you type, it shows the live tokenization, so you can see how the prompt will actually be split before running it:
 
@@ -145,8 +145,8 @@ Then, after the run:
 There's also a replay mode, for looking at a run after the fact or on a machine with no checkpoint:
 
 ```bash
-go run . -trace run.jsonl           # record while the walkthrough runs
-go run ./cmd/inspect -f run.jsonl   # replay it
+go run . -trace run.jsonl   # record while the walkthrough runs
+go run . -f run.jsonl       # replay it — no checkpoint, no menu, straight to the inspect screen
 ```
 
 Both render identical data, because both go through `tools/trace/`: the live collector and the file writer share their event constructors.
@@ -223,9 +223,9 @@ Attribution and the attention grid are both still just *watching* the forward pa
   27      " Paris"          65.7%    " a"               12.4%
 ```
 
-The two runs already disagree by layer 2 — long before the baseline commits to " Paris" at layer 22 — so this head is doing something far upstream of where attribution said the decision happens, and the model never recovers " Paris" once it's gone. `cmd/inspect`'s fifth tab (`5`) shows this comparison live: pick a layer and head with the arrow keys, press `a` to ablate it, and see which layer the two runs first disagree at.
+The two runs already disagree by layer 2 — long before the baseline commits to " Paris" at layer 22 — so this head is doing something far upstream of where attribution said the decision happens, and the model never recovers " Paris" once it's gone. It's why Ablation leads the welcome menu: the inspect screen's first tab (`1`) shows this comparison live — pick a layer and head with the arrow keys, press `a` to ablate it, and see which layer the two runs first disagree at.
 
-Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `1`–`5` jump to a view, `a` ablate the selected head, `g`/`G` first/last layer, `q` quit.
+Keys: `↑↓` layer, `←→` head, `n`/`p` step between generated tokens, `tab` view, `1`–`5` jump to a view (ablation, attention, attribution, logit lens, stages), `a` ablate the selected head, `g`/`G` first/last layer, `esc` back to the picker, `q` quit.
 
 Stepping between tokens is where it gets interesting. On `"The capital of France is"` the answer lands at layer 22. On the *next* token — after "…is Paris." — the model predicts `" The"`, and that one settles by layer 19. Different tokens are decided at different depths.
 
@@ -276,7 +276,7 @@ type AttributionTracer interface {
 }
 ```
 
-`AttributionTopK` is a second gate on top of the type assertion, so a tracer that only sometimes wants attribution doesn't have to change its type to say so — returning zero turns the whole path off, recording included. The chat UI leaves it off; `-trace` and `cmd/inspect` turn it on.
+`AttributionTopK` is a second gate on top of the type assertion, so a tracer that only sometimes wants attribution doesn't have to change its type to say so — returning zero turns the whole path off, recording included. The chat UI leaves it off; `-trace` and the inspect screen turn it on.
 
 Effects are reported against the pass's own top candidates rather than the whole vocabulary. Attributing every token would mean a full LM head projection per component — sixteen extra forward passes per layer — and the question worth asking is which components pushed the tokens that were actually in contention. Folding the final norm into the unembedding directions once, instead of into every component, keeps the whole thing to a few hundred thousand multiply-adds against a 155M-parameter LM head.
 
@@ -291,10 +291,10 @@ What this measures is the *direct* path: what a component contributed by writing
 ```text
 engine/model/  ──Tracer──▶  tools/walkthrough/     terminal walkthrough
                        └─▶  tools/trace/  ┬─ Writer  ──▶ JSONL file ─┐
-                                          └─ Collector ─ in memory ──┴─▶ cmd/inspect (TUI)
+                                          └─ Collector ─ in memory ──┴─▶ tools/tui (inspect screen)
 ```
 
-One rule holds it together: **nothing under `engine/` imports `tools/` or `cmd/`.** That's what the two top-level folders are for. The interface lives in `engine/model/` because that's where it's consumed; every implementation lives outside. `TestEngineHasNoThirdPartyDependencies` and `TestEngineDoesNotImportTooling` parse the import graph and fail if either invariant breaks.
+One rule holds it together: **nothing under `engine/` imports `tools/`.** That's what the top-level folder is for. The interface lives in `engine/model/` because that's where it's consumed; every implementation lives outside. `TestEngineHasNoThirdPartyDependencies` and `TestEngineDoesNotImportTooling` parse the import graph and fail if either invariant breaks.
 
 `Writer` and `Collector` share their event constructors, so a live view and a replayed file are looking at byte-identical data and the UI needs only one rendering path. Both copy every slice they keep, as the contract requires.
 
@@ -464,6 +464,10 @@ chat.go              the interactive path: wires the picker's choice into a
                      live *model.GPT and turns typed lines into streamed tokens
                      plus the per-token attention/candidate summaries the
                      chat screen's inspect tab shows
+inspect_engine.go    the same wiring for the inspect screen: loads a
+                     checkpoint, runs traced prefill/decode passes (optionally
+                     with a head ablated), and answers the live tokenization
+                     preview — used to be its own binary, cmd/inspect
 
 engine/
   tokenizer/         byte-level BPE, hand-written pretokenizer, tokenizer.json
@@ -493,15 +497,22 @@ tools/
     root.go          Root — one bubbletea model that owns every screen and
                      decides which is visible, so a screen can be left rather
                      than only ever ended
-    welcome.go       screen 1: this machine, and what's on disk to run on it
+    welcome.go       screen 1: this machine and what's on disk to run on it,
+                     and the tool menu — Ablation, Attention, Attribution,
+                     Logit Lens, Chat
     picker.go        screen 2: every known model, memory cost against this
-                     machine, and a fits/recommended/too-large verdict
+                     machine, and a fits/recommended/too-large verdict —
+                     shared by every tool picked on the welcome menu
     catalog.go       the model list itself — names, architectures, what's
                      installed under a checkpoint root
     download.go      screen: fetches a picked model's weights from HuggingFace
                      (via tools/hf) and shows live progress, in place of
                      sending you to another terminal to run huggingface-cli
-    chat.go          screen 3: the conversation, plus the inspect tab
+    chat.go          screen: the conversation, plus the inspect tab
+    inspect.go       screen: the pass inspector — logit lens, attention,
+                     attribution, ablation, stages — ported in from what used
+                     to be the separate cmd/inspect binary
+    inspect_views.go the five views' rendering
     about.go         the "what is GoLlama" page
     history.go       screen: "past conversations" — read-only playback of
                      whatever tools/history has saved
@@ -518,8 +529,6 @@ tools/
   history/           persists chat transcripts as JSON, one file per
                      conversation, under ~/.gollama/history
   sysinfo/           what hardware this is about to run on
-
-cmd/inspect/         interactive TUI: type a prompt, run it, inspect the trace
 
 .github/workflows/   CI: go build ./... and go test ./... on every push to main
 ```

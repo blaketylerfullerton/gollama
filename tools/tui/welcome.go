@@ -28,34 +28,55 @@ import (
 type Choice int
 
 const (
-	// Quit means they backed out — ctrl+c, q, or esc. The caller should exit
+	// Quit means they backed out — ctrl+c or q. The caller should exit
 	// without loading anything.
 	Quit Choice = iota
-	// Run means they picked "select a model" — go to the picker.
+	// Run means they picked a tool — go to the picker to choose a model for
+	// it. Which tool is in Tool().
 	Run
-	// ShowAbout means they picked "what is GoLlama" — go read the about page,
+	// ShowAbout means they pressed the about key — go read the about page,
 	// then come back to this menu.
 	ShowAbout
-	// ShowHistory means they picked "past conversations" — go read saved
-	// chats, then come back to this menu.
+	// ShowHistory means they pressed the history key — go read saved chats,
+	// then come back to this menu.
 	ShowHistory
 )
 
-// menuItem is one box of the start menu: what it's called, what picking it
-// leads to, and the detail panel shown while it's highlighted.
+// Tool is which tool a Run choice picked. Root reads it once, right after
+// Choice()==Run, to decide what the picker leads to.
+type Tool int
+
+const (
+	// ToolAblation forces a chosen attention head's output to zero and
+	// compares the answer against the baseline — the one tool here that
+	// intervenes instead of just watching. First in the menu because it's
+	// the most distinctive thing GoLlama can show.
+	ToolAblation Tool = iota
+	ToolAttention
+	ToolAttribution
+	ToolLens
+	// ToolChat talks to the model turn by turn, same as every other tool a
+	// peer of in this list rather than the separate program it used to be.
+	ToolChat
+)
+
+// menuItem is one box of the start menu: what it's called, which tool
+// picking it opens, and the detail panel shown while it's highlighted.
 type menuItem struct {
-	title  string
-	choice Choice
+	title string
+	tool  Tool
 	// detail renders the content panel for this item. It's a func rather than
-	// a precomputed string because the machine specs need the terminal width
-	// to wrap the download command, and that isn't known until View runs.
+	// a precomputed string because some detail panels need the terminal width
+	// to wrap, and that isn't known until View runs.
 	detail func(w *Welcome) string
 }
 
 var menuItems = []menuItem{
-	{title: "select a model", choice: Run, detail: (*Welcome).weightsBlurb},
-	{title: "what is GoLlama", choice: ShowAbout, detail: (*Welcome).aboutBlurb},
-	{title: "past conversations", choice: ShowHistory, detail: (*Welcome).historyBlurb},
+	{title: "Ablation", tool: ToolAblation, detail: (*Welcome).ablationBlurb},
+	{title: "Attention", tool: ToolAttention, detail: (*Welcome).attentionBlurb},
+	{title: "Attribution", tool: ToolAttribution, detail: (*Welcome).attributionBlurb},
+	{title: "Logit Lens", tool: ToolLens, detail: (*Welcome).lensBlurb},
+	{title: "Chat", tool: ToolChat, detail: (*Welcome).chatBlurb},
 }
 
 // Checkpoint is what we found on disk where the weights are meant to be. It's
@@ -109,9 +130,10 @@ type Welcome struct {
 	// first time may not still be true.
 	dir          string
 	ckpt         Checkpoint
-	historyCount int // how many saved conversations to mention in the third box
+	historyCount int // how many saved conversations to mention in the chat blurb
 	choice       Choice
-	cursor       int // which menuItems row is highlighted
+	tool         Tool // which menuItems row Choice()==Run picked
+	cursor       int  // which menuItems row is highlighted
 	w, h         int
 	// tick counts animation frames rather than storing one, so the llama's two
 	// motions can be derived from it independently. See llamaFrameAt.
@@ -141,6 +163,10 @@ func NewWelcomeFor(sys sysinfo.Info, checkpointDir string) *Welcome {
 
 // Choice reports what the user picked. Valid once the screen has finished.
 func (w *Welcome) Choice() Choice { return w.choice }
+
+// Tool reports which tool a Run choice picked. Valid once the screen has
+// finished with Choice()==Run.
+func (w *Welcome) Tool() Tool { return w.tool }
 
 // reopen re-reads what the menu describes, for a screen that is about to be
 // shown again rather than built.
@@ -179,7 +205,17 @@ func (w *Welcome) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j":
 			w.cursor = min(w.cursor+1, len(menuItems)-1)
 		case "enter", " ":
-			w.choice = menuItems[w.cursor].choice
+			w.choice = Run
+			w.tool = menuItems[w.cursor].tool
+			return w, done
+		// a and h are off the row list entirely now that every row is a tool —
+		// About and past conversations still need a way in, they just
+		// shouldn't compete with tools for a cursor row.
+		case "a":
+			w.choice = ShowAbout
+			return w, done
+		case "h":
+			w.choice = ShowHistory
 			return w, done
 		// esc is deliberately not bound here: every other screen uses it to go
 		// back a level, and this is the screen you land back on after doing
@@ -250,10 +286,9 @@ func (w *Welcome) column(width, rows int) string {
 		menu)
 }
 
-// menu is the list of what you can do from here: one title per line, toggled
-// up/down the same way the picker's and history's own lists are, with the
-// highlighted title's detail rendered in a single panel underneath it —
-// machine specs for "select a model", a teaser for the other two.
+// menu is the list of tools, toggled up/down the same way the picker's and
+// history's own lists are, with the highlighted one's detail rendered in a
+// single panel underneath it.
 func (w *Welcome) menu(width, rows int) string {
 	titles := make([]string, len(menuItems))
 	for i, item := range menuItems {
@@ -270,8 +305,12 @@ func (w *Welcome) menu(width, rows int) string {
 }
 
 // machineSpecs is the always-visible panel above the menu: what this machine
-// is, so the two options below it can be judged against real hardware rather
-// than in the abstract.
+// is and what's on disk to run on it, so every tool below can be judged
+// against real hardware rather than in the abstract. Weights status used to
+// be its own detail panel under a "select a model" row; now that every row is
+// a tool rather than one of them being about models specifically, it lives
+// here instead, where it's never lost regardless of which tool is
+// highlighted.
 func (w *Welcome) machineSpecs() string {
 	s := w.sys
 	rows := []string{
@@ -295,84 +334,99 @@ func (w *Welcome) machineSpecs() string {
 		memory,
 		row("platform", s.Platform()),
 		row("runtime", fmt.Sprintf("%s · GOMAXPROCS %d", s.GoVersion, s.GOMAXPROCS)),
+		w.weightsRow(),
 	)
 	return strings.Join(rows, "\n")
 }
 
-// weightsBlurb is the detail panel for the menu's first box: what's on disk to
-// run on this machine.
-func (w *Welcome) weightsBlurb() string {
-	rows := append([]string{heading("Weights")}, w.checkpointRows()...)
-	return strings.Join(rows, "\n")
-}
-
-func (w *Welcome) checkpointRows() []string {
+// weightsRow is one line, not a section of its own: this used to be a detail
+// panel shown only while "select a model" was highlighted, with room for a
+// few paragraphs of guidance. Folded into the always-visible machine panel it
+// has to sit above five tool blurbs rather than replace one of them, so it
+// says what's on disk and leaves the how — the picker downloads a missing
+// model itself, no separate command — to the picker, which is where that
+// actually happens.
+func (w *Welcome) weightsRow() string {
 	if !w.ckpt.Present {
-		return []string{
-			styledRow("model", warnStyle.Render("none found")),
-			row("expected", w.ckpt.Dir),
-			"",
-			dimStyle.Render("Pick \"select a model\" and press enter on one — it downloads"),
-			dimStyle.Render("straight from HuggingFace, no separate command to run."),
-			"",
-			dimStyle.Render("Until then GoLlama runs a tiny random model, so every stage"),
-			dimStyle.Render("still works and the numbers are noise."),
-		}
+		// Just the verdict, not the expected path: that can be long enough to
+		// wrap onto a second line in this always-visible panel, where the
+		// detail panel it used to live in had room to spare for one. The
+		// picker — one keypress away, on every tool — says the rest.
+		return styledRow("weights", warnStyle.Render("none found"))
 	}
-	return []string{
-		row("model", filepath.Base(w.ckpt.Dir)),
-		row("on disk", sysinfo.Bytes(w.ckpt.Bytes)),
-		// The loader widens every stored bf16 to a float32, so what ends up in
-		// memory is twice what's on disk. Worth saying out loud: it's the
-		// difference between "fits easily" and "swapping" on a small machine.
-		styledRow("resident", valueStyle.Render(sysinfo.Bytes(w.ckpt.Bytes*2))+
-			dimStyle.Render("  (bf16 → f32)")),
-		"",
-		dimStyle.Render("Every matmul is scalar Go on the CPU, so expect"),
-		dimStyle.Render("tokens in the hundreds of milliseconds, not micro-"),
-		dimStyle.Render("seconds. That slowness is the point: it's readable."),
-	}
+	return styledRow("weights", valueStyle.Render(fmt.Sprintf("%s (%s on disk)",
+		filepath.Base(w.ckpt.Dir), sysinfo.Bytes(w.ckpt.Bytes))))
 }
 
-// aboutBlurb is the detail panel for the menu's second row: enough to say what
-// pressing enter leads to, not the whole page — that's what the about page
-// itself is for.
-func (w *Welcome) aboutBlurb() string {
+// ablationBlurb is the detail panel for the menu's first row: what makes
+// ablation different from the three tools under it.
+func (w *Welcome) ablationBlurb() string {
+	return strings.Join([]string{
+		heading("Ablation"),
+		"",
+		dimStyle.Render("Force one attention head's output to zero and re-run the prompt —"),
+		dimStyle.Render("if the answer actually moves, the head mattered; if it doesn't,"),
+		dimStyle.Render("whatever attribution measured wasn't load-bearing. The one tool"),
+		dimStyle.Render("here that intervenes instead of just watching."),
+	}, "\n")
+}
+
+// attentionBlurb is the detail panel for the menu's second row.
+func (w *Welcome) attentionBlurb() string {
+	return strings.Join([]string{
+		heading("Attention"),
+		"",
+		dimStyle.Render("See what each head attended to, layer by layer — the causal"),
+		dimStyle.Render("weights over every earlier token, coloured by magnitude."),
+	}, "\n")
+}
+
+// attributionBlurb is the detail panel for the menu's third row.
+func (w *Welcome) attributionBlurb() string {
+	return strings.Join([]string{
+		heading("Attribution"),
+		"",
+		dimStyle.Render("See which components — which head, which MLP — actually pushed"),
+		dimStyle.Render("the final answer, and by how much, positive or negative."),
+	}, "\n")
+}
+
+// lensBlurb is the detail panel for the menu's fourth row.
+func (w *Welcome) lensBlurb() string {
+	return strings.Join([]string{
+		heading("Logit Lens"),
+		"",
+		dimStyle.Render("Watch the prediction form layer by layer: what the model would"),
+		dimStyle.Render("have said if it stopped early, and where the real answer first"),
+		dimStyle.Render("takes the lead."),
+	}, "\n")
+}
+
+// chatBlurb is the detail panel for the menu's fifth row.
+func (w *Welcome) chatBlurb() string {
 	rows := []string{
-		heading("What is GoLlama"),
+		heading("Chat"),
 		"",
-		dimStyle.Render(aboutNotes[0]),
-		"",
-		valueStyle.Render("enter") + dimStyle.Render(" to read the rest — architecture, how the"),
-		dimStyle.Render("inspector works, and what's slow on purpose and why."),
+		dimStyle.Render("Talk to the model turn by turn. Nothing here is shown live, but"),
+		dimStyle.Render("every reply is recorded —"),
 	}
+	rows = append(rows, dimStyle.Render(fmt.Sprintf("%s history for %s.",
+		keyStyle.Render("h"), w.historySummary())))
 	return strings.Join(rows, "\n")
 }
 
-// historyBlurb is the detail panel for the menu's third box: how many
-// conversations there are to read back, not their contents — that's what the
+// historySummary is the one-line count chatBlurb reads off history — how many
+// conversations there are to read back, not their contents, which is what the
 // history page itself is for.
-func (w *Welcome) historyBlurb() string {
+func (w *Welcome) historySummary() string {
 	if w.historyCount == 0 {
-		return strings.Join([]string{
-			heading("Past conversations"),
-			"",
-			dimStyle.Render("Nothing saved yet. Every conversation on the chat screen is written"),
-			dimStyle.Render("here as it happens, so it's still here next time you open GoLlama."),
-		}, "\n")
+		return "past conversations (none saved yet)"
 	}
 	plural := "s"
 	if w.historyCount == 1 {
 		plural = ""
 	}
-	return strings.Join([]string{
-		heading("Past conversations"),
-		"",
-		fmt.Sprintf("%s saved conversation%s", valueStyle.Render(fmt.Sprint(w.historyCount)), plural),
-		"",
-		valueStyle.Render("enter") + dimStyle.Render(" to read back what was said, without"),
-		dimStyle.Render("reloading the model or the engine behind it."),
-	}, "\n")
+	return fmt.Sprintf("%d saved conversation%s", w.historyCount, plural)
 }
 
 // bar is the toolbar along the bottom: the keys this screen answers to on the
@@ -381,10 +435,11 @@ func (w *Welcome) bar() string {
 	keys := []string{
 		keyStyle.Render("↑↓") + dimStyle.Render(" choose"),
 		keyStyle.Render("enter") + dimStyle.Render(" select"),
+		keyStyle.Render("a") + dimStyle.Render(" about"),
+		keyStyle.Render("h") + dimStyle.Render(" history"),
 		keyStyle.Render("q") + dimStyle.Render(" quit"),
 	}
-	return toolbar(w.w, strings.Join(keys, dimStyle.Render(" · ")),
-		dimStyle.Render("go run ./cmd/inspect to step through a pass"))
+	return toolbar(w.w, strings.Join(keys, dimStyle.Render(" · ")), "")
 }
 
 // --- small formatting helpers ------------------------------------------------

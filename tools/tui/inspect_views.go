@@ -1,4 +1,4 @@
-package main
+package tui
 
 import (
 	"fmt"
@@ -12,29 +12,13 @@ import (
 	"github.com/blaketylerfullerton/GoLlama/tools/trace"
 )
 
-// This screen is where the two tracks earn their keep — see tools/amber. The
+// This is where the two tracks earn their keep — see tools/amber. The
 // attention matrix and the logit-lens bars are coloured by calling amber.Of on
 // the number itself, and everything around them is grey, so the only saturated
-// thing in the frame is the data. That used to be untrue: the chrome was on the
-// same ramp, which meant a mid-level border and a mid-level attention weight
-// were the same colour and the eye had no way to tell the reading from the
-// furniture except by position.
-var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.N(0)).Background(amber.At(amber.Accent))
-	dimStyle   = amber.NFg(amber.Muted)
-	keyStyle   = amber.Fg(amber.Accent).Bold(true)
-	hotStyle   = amber.NFg(amber.Strong).Bold(true)
-	selStyle   = lipgloss.NewStyle().Bold(true).Foreground(amber.N(0)).Background(amber.At(amber.Accent))
-	// A column heading names the numbers under it and is not one of them, so it
-	// goes to the top of the furniture track. On the old shared ramp this had
-	// to be held down at a low level to avoid outshining the data; off the data
-	// track there is nothing to outshine, because grey makes no claim about
-	// magnitude however bright it gets.
-	headerRowStyle = amber.NFg(amber.Body).Bold(true)
-	tabStyle       = amber.NFg(amber.Muted)
-	activeTabStyle = lipgloss.NewStyle().Bold(true).Foreground(amber.N(0)).Background(amber.At(amber.Accent))
-	errStyle       = lipgloss.NewStyle().Foreground(amber.Alert).Bold(true)
-)
+// thing in the frame is the data. Chrome shared with the rest of the package —
+// titleStyle, dimStyle, keyStyle, warnStyle, headingStyle, selectedStyle,
+// headerRowStyle, tabStyle, activeTabStyle — lives in style.go rather than
+// being redefined here.
 
 // --- logit lens -------------------------------------------------------------
 
@@ -42,7 +26,7 @@ var (
 // bottom is watching an answer get found: early layers guess generic function
 // words, some middle layer commits to the actual token, and the last few sharpen
 // or hedge it.
-func (a *app) lensView() string {
+func (a *Inspect) lensView() string {
 	s := a.active()
 	if s == nil {
 		return ""
@@ -99,9 +83,9 @@ func (a *app) lensView() string {
 
 		switch {
 		case e.Layer == a.layer:
-			b.WriteString(selStyle.Render(row))
+			b.WriteString(selectedStyle.Render(row))
 		case e.Layer == firstWin:
-			b.WriteString(hotStyle.Render(row))
+			b.WriteString(headingStyle.Render(row))
 		default:
 			b.WriteString(row)
 		}
@@ -118,7 +102,7 @@ func (a *app) lensView() string {
 
 // --- attention --------------------------------------------------------------
 
-func (a *app) attentionView() string {
+func (a *Inspect) attentionView() string {
 	s := a.active()
 	if s == nil {
 		return ""
@@ -204,7 +188,7 @@ func heat(w float32) lipgloss.Style {
 // The two views are worth reading together — a head with a striking pattern and
 // no push is doing something the output doesn't depend on, and that combination
 // is common enough that the pattern alone is easy to over-read.
-func (a *app) attributionView() string {
+func (a *Inspect) attributionView() string {
 	s := a.active()
 	if s == nil {
 		return ""
@@ -225,7 +209,7 @@ func (a *app) attributionView() string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("  layer %s   pushing %s\n\n",
 		keyStyle.Render(fmt.Sprint(a.layer)),
-		hotStyle.Render(truncate(fmt.Sprintf("%q", label), 16))))
+		headingStyle.Render(truncate(fmt.Sprintf("%q", label), 16))))
 
 	// Bars are scaled within the layer, so a layer that barely moves anything
 	// doesn't render as flat — the shape across its components is still the
@@ -248,7 +232,7 @@ func (a *app) attributionView() string {
 		row := fmt.Sprintf("  %-10s %+9.3f %9.3f  %s",
 			componentName(e), v, e.Norm, signedBar(float64(v), scale, 12))
 		if e.Component == trace.ComponentHead && e.Head == a.head {
-			b.WriteString(selStyle.Render(row))
+			b.WriteString(selectedStyle.Render(row))
 		} else {
 			b.WriteString(row)
 		}
@@ -265,7 +249,7 @@ func (a *app) attributionView() string {
 
 // attributionTarget is the token being attributed: whatever the pass finally
 // predicted.
-func (a *app) attributionTarget(s *step) (int, string) {
+func (a *Inspect) attributionTarget(s *inspectStep) (int, string) {
 	if final := a.finalPrediction(); final != nil {
 		return final.ID, final.Text
 	}
@@ -279,7 +263,7 @@ func (a *app) attributionTarget(s *step) (int, string) {
 
 // topContributors ranks every component in the run by how hard it pushed the
 // target, so a layer-by-layer view has somewhere to start.
-func (a *app) topContributors(s *step, target, n int) []string {
+func (a *Inspect) topContributors(s *inspectStep, target, n int) []string {
 	type hit struct {
 		label string
 		v     float32
@@ -344,7 +328,7 @@ func signedBar(v, scale float64, half int) string {
 // selected head's output forced to zero, layer by layer. It answers the
 // question attribution can only guess at: does this head actually change the
 // answer, or just look busy?
-func (a *app) ablationView() string {
+func (a *Inspect) ablationView() string {
 	if len(a.steps) == 0 {
 		return ""
 	}
@@ -400,9 +384,9 @@ func (a *app) ablationView() string {
 
 		switch {
 		case be.Layer == a.layer:
-			b.WriteString(selStyle.Render(row))
+			b.WriteString(selectedStyle.Render(row))
 		case be.Layer == firstDiverge:
-			b.WriteString(hotStyle.Render(row))
+			b.WriteString(headingStyle.Render(row))
 		default:
 			b.WriteString(row)
 		}
@@ -425,7 +409,7 @@ func (a *app) ablationView() string {
 
 // --- stages -----------------------------------------------------------------
 
-func (a *app) stagesView() string {
+func (a *Inspect) stagesView() string {
 	s := a.active()
 	if s == nil {
 		return ""

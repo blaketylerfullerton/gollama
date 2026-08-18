@@ -43,6 +43,17 @@ var (
 			Border(lipgloss.RoundedBorder()).BorderForeground(amber.N(amber.Edge)).
 			Padding(0, 2)
 
+	// headerRowStyle names the columns above a table (the inspect screen's
+	// logit-lens/attention/attribution rows) — off the data track like any
+	// other heading, so it doesn't compete with the magnitudes underneath it.
+	headerRowStyle = amber.NFg(amber.Body).Bold(true)
+	// tabStyle/activeTabStyle are the inspect screen's view switcher — the
+	// same reversed-field treatment titleStyle/selectedStyle already use for
+	// "the thing you're on", just narrower.
+	tabStyle       = amber.NFg(amber.Muted)
+	activeTabStyle = lipgloss.NewStyle().Bold(true).
+			Foreground(amber.N(0)).Background(amber.At(amber.Accent))
+
 	// ruleStyle draws a divider a title badge sits on top of — see titleRule.
 	// A step below the panel border, the same weight the toolbar's own frame
 	// uses, so the line reads as chrome rather than as content of its own.
