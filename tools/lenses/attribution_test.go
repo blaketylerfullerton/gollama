@@ -1,10 +1,10 @@
-package model
+package lenses
 
 import (
 	"math"
 	"testing"
 
-	"github.com/blaketylerfullerton/GoLlama/engine/tokenizer"
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
 )
 
 // recorder collects everything the attribution path emits. It implements the
@@ -58,7 +58,7 @@ func (r *lensRecorder) LogitLens(layer int, _ []float32, target int) {
 // wrong vector. So this is the test that makes the feature mean anything.
 func TestAttributionSumsToTheLogit(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,11 +99,11 @@ func TestAttributionSumsToTheLogit(t *testing.T) {
 // uses and the one where only the last position is projected.
 func TestAttributionSumsToTheLogitWithCache(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache := NewKVCache(cfg)
+	cache := model.NewKVCache(cfg)
 
 	// Prefill untraced, so attribution is measured on a decode step reading real
 	// history out of the cache rather than on a fresh sequence.
@@ -132,7 +132,7 @@ func TestAttributionSumsToTheLogitWithCache(t *testing.T) {
 // Components are labelled, or a caller can't tell head 0 from the MLP.
 func TestAttributionLabelsComponents(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +143,12 @@ func TestAttributionLabelsComponents(t *testing.T) {
 	var heads, mlps, embeds int
 	for _, g := range rec.got {
 		switch {
-		case g.component == ComponentEmbed:
+		case g.component == model.ComponentEmbed:
 			embeds++
 			if g.layer != -1 {
 				t.Errorf("the embedding is at layer %d, want -1", g.layer)
 			}
-		case g.component == ComponentMLP:
+		case g.component == model.ComponentMLP:
 			mlps++
 		case g.component >= 0 && g.component < cfg.NHead:
 			heads++
@@ -169,7 +169,7 @@ func TestAttributionLabelsComponents(t *testing.T) {
 // A tracer that asks for zero tokens must cost nothing: no events, and no
 // recording work behind the scenes either.
 func TestAttributionOffWhenTopKIsZero(t *testing.T) {
-	gpt, err := NewRandomGPT(tinyConfig())
+	gpt, err := model.NewRandomGPT(tinyConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestAttributionOffWhenTopKIsZero(t *testing.T) {
 // to be the argmax of the real output.
 func TestLogitLensRunsInLayerOrderWithTheTarget(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestLogitLensRunsInLayerOrderWithTheTarget(t *testing.T) {
 			t.Errorf("lens readout %d is for layer %d", i, l)
 		}
 	}
-	if want := Argmax(logits[len(logits)-1]); rec.target != want {
+	if want := model.Argmax(logits[len(logits)-1]); rec.target != want {
 		t.Errorf("lens target is %d, want the output argmax %d", rec.target, want)
 	}
 }
@@ -213,7 +213,7 @@ func TestLogitLensRunsInLayerOrderWithTheTarget(t *testing.T) {
 // to a sum of outputs. This checks the identity the attribution math relies on
 // rather than trusting the comment above it.
 func TestRMSNormIsLinearAtFixedScale(t *testing.T) {
-	n := NewRMSNorm(4, 1e-6)
+	n := model.NewRMSNorm(4, 1e-6)
 	n.Weight = []float32{0.5, 1.5, 2, 1}
 
 	a := []float32{1, -2, 3, 0.5}
@@ -238,18 +238,14 @@ func TestRMSNormIsLinearAtFixedScale(t *testing.T) {
 // usable, so the tolerance here is relative to the logit rather than absolute.
 func TestAttributionSumsToTheLogitOnRealWeights(t *testing.T) {
 	gpt := realGPT(t)
-
-	tok, err := tokenizer.FromDirectory(checkpointDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tok := tokenizerFor(t)
 	ids := tok.Encode("The capital of France is")
 
 	rec := &recorder{topK: 3}
 	gpt.Trace = rec
 	defer func() { gpt.Trace = nil }()
 
-	cache := NewKVCache(gpt.Config)
+	cache := model.NewKVCache(gpt.Config)
 	last, err := gpt.ForwardCached(ids, cache)
 	if err != nil {
 		t.Fatal(err)

@@ -1,23 +1,27 @@
-package model
+package lenses
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/blaketylerfullerton/GoLlama/engine/model"
+)
 
 // A nil ablate set is what every existing caller passes (via ForwardCached),
 // so it must be a true no-op — this is the regression guard for turning
 // ForwardCached into a thin wrapper around ForwardCachedAblated.
 func TestForwardCachedAblatedNilMatchesForwardCached(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ids := []int{1, 5, 9}
 
-	want, err := gpt.ForwardCached(ids, NewKVCache(cfg))
+	want, err := gpt.ForwardCached(ids, model.NewKVCache(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := gpt.ForwardCachedAblated(ids, NewKVCache(cfg), nil)
+	got, err := gpt.ForwardCachedAblated(ids, model.NewKVCache(cfg), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,24 +42,24 @@ func TestForwardCachedAblatedNilMatchesForwardCached(t *testing.T) {
 // all, just accepted and ignored.
 func TestAblatingEveryHeadChangesLogits(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ids := []int{1, 5, 9, 2}
 
-	base, err := gpt.ForwardCached(ids, NewKVCache(cfg))
+	base, err := gpt.ForwardCached(ids, model.NewKVCache(cfg))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	var all []HeadRef
+	var all []model.HeadRef
 	for l := 0; l < cfg.NLayer; l++ {
 		for h := 0; h < cfg.NHead; h++ {
-			all = append(all, HeadRef{Layer: l, Head: h})
+			all = append(all, model.HeadRef{Layer: l, Head: h})
 		}
 	}
-	ablated, err := gpt.ForwardCachedAblated(ids, NewKVCache(cfg), all)
+	ablated, err := gpt.ForwardCachedAblated(ids, model.NewKVCache(cfg), all)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +76,7 @@ func TestAblatingEveryHeadChangesLogits(t *testing.T) {
 // own recorded write should vanish, but its layer-mates must not.
 func TestAblationIsScopedToItsOwnHead(t *testing.T) {
 	cfg := tinyConfig()
-	gpt, err := NewRandomGPT(cfg)
+	gpt, err := model.NewRandomGPT(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +85,7 @@ func TestAblationIsScopedToItsOwnHead(t *testing.T) {
 	defer func() { gpt.Trace = nil }()
 
 	ids := []int{1, 5, 9}
-	if _, err := gpt.ForwardCachedAblated(ids, NewKVCache(cfg), []HeadRef{{Layer: 0, Head: 0}}); err != nil {
+	if _, err := gpt.ForwardCachedAblated(ids, model.NewKVCache(cfg), []model.HeadRef{{Layer: 0, Head: 0}}); err != nil {
 		t.Fatal(err)
 	}
 
