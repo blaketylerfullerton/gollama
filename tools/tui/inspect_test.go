@@ -734,7 +734,10 @@ func TestInspectEnterSubmitsThePrompt(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("enter should produce a command that sends the request")
 	}
-	cmd() // bubbletea would run this on its own goroutine
+	// Submitting now also restarts the spinner's tick chain alongside the
+	// send, so this batches two commands rather than being the lone send
+	// itself — runCmd unwraps that the way bubbletea's own runtime would.
+	runCmd(cmd)
 
 	select {
 	case req := <-reqs:
@@ -773,7 +776,7 @@ func TestInspectSubmitClearsPreviousRun(t *testing.T) {
 	a.Update(key("i")) // back to the prompt
 	a.input.SetValue("second")
 	_, cmd := a.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	cmd()
+	runCmd(cmd) // batched with the spinner's restart — see runCmd's doc comment
 	<-reqs
 
 	if len(a.steps) != 0 {

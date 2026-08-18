@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -219,6 +220,13 @@ type Inspect struct {
 	err       error
 	outcome   InspectOutcome
 
+	// spin animates next to status while the engine is doing something with
+	// nothing more specific to report — loading a checkpoint, prefilling a
+	// prompt, generating a token. It ticks itself back to life on every
+	// submit() (see there) and stops re-scheduling on its own once Update
+	// sees a phase it no longer applies to — nothing has to cancel it.
+	spin spinner.Model
+
 	// preview is the last token-preview response, rendered alongside the
 	// prompt field while editing. It can lag the input by one keystroke —
 	// the round trip to the engine is asynchronous — which is a smaller cost
@@ -276,6 +284,7 @@ func NewInspectLive(events <-chan tea.Msg, reqs chan<- InspectRequest, prompt st
 		events: events, reqs: reqs,
 		phase: inspectLoading, input: in, maxTokens: maxTokens,
 		status: "starting…", view: initial,
+		spin: spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(keyStyle)),
 	}
 }
 
@@ -326,9 +335,16 @@ func (a *Inspect) attnQueryCount() int {
 
 func (a *Inspect) Init() tea.Cmd {
 	if a.live() {
-		return tea.Batch(waitForInspect(a.events), textinput.Blink)
+		return tea.Batch(waitForInspect(a.events), textinput.Blink, a.spin.Tick)
 	}
 	return nil
+}
+
+// waiting is whether there's nothing to show but a status word — checkpoint
+// still loading, or a pass still running — which is when spin should be
+// spending its ticks.
+func (a *Inspect) waiting() bool {
+	return a.phase == inspectLoading || a.phase == inspectRunning
 }
 
 func (a *Inspect) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -336,6 +352,18 @@ func (a *Inspect) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		a.w, a.h = msg.Width, msg.Height
 		a.input.Width = max(20, a.w-20)
+
+	case spinner.TickMsg:
+		// Every tick reschedules its own successor (see spinner.Model.Update),
+		// so simply not forwarding one — because the wait it was ticking for
+		// is already over — is enough to let the chain die out on its own.
+		// The next submit() is what starts a fresh one.
+		if a.waiting() {
+			var cmd tea.Cmd
+			a.spin, cmd = a.spin.Update(msg)
+			return a, cmd
+		}
+		return a, nil
 
 	case InspectStatus:
 		a.status = string(msg)
@@ -502,10 +530,14 @@ func (a *Inspect) submit() tea.Cmd {
 	a.lastPrompt = prompt
 
 	req := InspectRequest{Prompt: prompt, MaxTokens: a.maxTokens}
-	return func() tea.Msg {
+	send := func() tea.Msg {
 		a.reqs <- req
 		return nil
 	}
+	// The tick chain from the last run died out once it went back to
+	// browsing (see Update's spinner.TickMsg case) — restart it here rather
+	// than leave the spinner frozen on whatever frame it last drew.
+	return tea.Batch(send, a.spin.Tick)
 }
 
 // requestPreview asks the engine to tokenize whatever's currently in the
@@ -549,37 +581,49 @@ func (a *Inspect) toggleAblate() tea.Cmd {
 }
 
 // View lays out through the shared frame — see layout.go's screen() — rather
-// than just stacking header/body/keys itself, the way this screen used to.
+// than just stacking header/box/keys itself, the way this screen used to.
 // That was the bug: the keys line floated wherever the content above it
 // stopped, so it landed at a different row every time the view changed
 // height. screen() pins the bar to the bottom of the terminal and pads
 // whatever's left, the same frame every other screen in this package already
 // uses, so the controls are always in the same place.
+//
+// Whatever's showing — a view, the loading status, an error — is drawn
+// inside the same bordered panel every other screen renders its content in
+// (welcome's detail pane, about's page, the picker's list), rather than as
+// bare text sitting under the header. stretch() grows it to fill the space
+// above the bar even when the content is short, so a one-line "no ablation
+// run yet" message doesn't leave a gap between its box and the toolbar.
 func (a *Inspect) View() string {
 	bar := a.bar()
+	inner := max(a.w-2*screenMargin, minSpecsWidth)
 
-	if a.err != nil {
-		body := lipgloss.JoinVertical(lipgloss.Left, a.header(),
-			" "+warnStyle.Render("error: "+a.err.Error()))
-		return screen(a.w, a.h, body, bar)
-	}
-	if a.active() == nil {
-		body := lipgloss.JoinVertical(lipgloss.Left, a.header(), " "+dimStyle.Render(a.status))
-		return screen(a.w, a.h, body, bar)
+	content := ""
+	switch {
+	case a.err != nil:
+		content = " " + warnStyle.Render("error: "+a.err.Error())
+	case a.active() == nil && a.waiting():
+		// No step yet because the checkpoint is still loading — as opposed
+		// to no step yet because nothing's been submitted, which reaches
+		// here too (phase inspectEditing) but has nothing running to animate.
+		content = " " + a.spin.View() + " " + dimStyle.Render(a.status)
+	case a.active() == nil:
+		content = " " + dimStyle.Render(a.status)
+	default:
+		switch a.view {
+		case viewAblation:
+			content = a.ablationView()
+		case viewAttention:
+			content = a.attentionView()
+		case viewAttribution:
+			content = a.attributionView()
+		case viewLens:
+			content = a.lensView()
+		}
 	}
 
-	view := ""
-	switch a.view {
-	case viewAblation:
-		view = a.ablationView()
-	case viewAttention:
-		view = a.attentionView()
-	case viewAttribution:
-		view = a.attributionView()
-	case viewLens:
-		view = a.lensView()
-	}
-	body := lipgloss.JoinVertical(lipgloss.Left, a.header(), view)
+	panel := stretch(panelStyle.Width(inner-2), a.panelHeight(), content)
+	body := lipgloss.JoinVertical(lipgloss.Left, a.header(), panel)
 	return screen(a.w, a.h, body, bar)
 }
 
@@ -614,7 +658,7 @@ func (a *Inspect) header() string {
 func (a *Inspect) promptLine() string {
 	switch a.phase {
 	case inspectLoading:
-		return " " + dimStyle.Render(a.status)
+		return " " + a.spin.View() + " " + dimStyle.Render(a.status)
 	case inspectEditing:
 		line := " " + a.input.View()
 		if len(a.preview) > 0 {
@@ -624,7 +668,7 @@ func (a *Inspect) promptLine() string {
 		return line + dimStyle.Render(fmt.Sprintf("\n enter to run · %d tokens to generate (+/-)",
 			a.maxTokens))
 	case inspectRunning:
-		return " " + dimStyle.Render(fmt.Sprintf("%q → %s", a.input.Value(), a.status))
+		return " " + a.spin.View() + " " + dimStyle.Render(fmt.Sprintf("%q → %s", a.input.Value(), a.status))
 	default:
 		return a.resultLine(a.input.Value())
 	}
@@ -721,13 +765,21 @@ func (a *Inspect) finalPrediction() *trace.Candidate {
 	return nil
 }
 
-// bodyHeight is what's left for a view once the header above it and the
-// pinned bar below it (see View) have taken their rows. Measured against the
+// panelHeight is how tall the bordered panel around the current view should
+// be, border included — passed to stretch() in View. Measured against the
 // real header and bar rather than a hand-counted constant, so a wider
 // terminal wrapping the bar onto two lines — or a step strip appearing —
-// shrinks this instead of the view silently overrunning it.
+// shrinks this instead of the panel silently overrunning it.
+func (a *Inspect) panelHeight() int {
+	return max(5, bodyRows(a.h, a.bar())-lipgloss.Height(a.header()))
+}
+
+// bodyHeight is how many content rows fit inside that panel — panelHeight
+// less the two rows its border takes (panelStyle has no vertical padding).
+// The views that scroll a table (lensView, attentionView, ablationView) use
+// this to decide how many of its rows to show via window().
 func (a *Inspect) bodyHeight() int {
-	return max(3, bodyRows(a.h, a.bar())-lipgloss.Height(a.header()))
+	return max(3, a.panelHeight()-2)
 }
 
 // formatTokenPreview renders the first n token strings with a separator, the
