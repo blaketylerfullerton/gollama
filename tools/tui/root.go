@@ -225,8 +225,14 @@ func (r *Root) advance() tea.Cmd {
 			if !m.Installed && !m.Demo {
 				return r.openDownload(m)
 			}
-			if r.pendingTool == ToolChat {
+			switch r.pendingTool {
+			case ToolChat:
 				return r.openChat(m)
+			case ToolModel:
+				// The welcome menu's Model row opens the picker on its own,
+				// with no analysis tool waiting behind it — once a model is
+				// chosen there's nothing left to do but go back.
+				return r.show(atWelcome)
 			}
 			return r.openInspect(m, r.pendingTool)
 		case Back:
@@ -244,8 +250,11 @@ func (r *Root) advance() tea.Cmd {
 			// used to describe it before it existed anywhere.
 			r.picker = NewPicker(r.root, r.sys)
 			found := findModel(r.picker.models, m.Dir, m)
-			if r.pendingTool == ToolChat {
+			switch r.pendingTool {
+			case ToolChat:
 				return r.openChat(found)
+			case ToolModel:
+				return r.show(atWelcome)
 			}
 			return r.openInspect(found, r.pendingTool)
 		case DownloadFailed:

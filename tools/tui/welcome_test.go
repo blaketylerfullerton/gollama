@@ -10,34 +10,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// The art is laid beside a panel, so a single short line would leave a notch in
-// the layout that only shows up at runtime. Every frame has to be the same size
-// as every other one too, or the panel beside it would jump on each tick.
-func TestLlamaFramesAreEqualSize(t *testing.T) {
-	for f, frame := range llamaFrames {
-		if len(frame) != llamaHeight {
-			t.Errorf("frame %d is %d rows, want %d", f, len(frame), llamaHeight)
-		}
-		for i, line := range frame {
-			if w := lipgloss.Width(line); w != llamaWidth {
-				t.Errorf("frame %d line %d is %d cells wide, want %d: %q", f, i, w, llamaWidth, line)
-			}
-		}
-	}
-}
-
-// Every tick has to land on a frame that exists, whatever the counter has got up
-// to — the nod and the blink index into the same slice from different clocks.
-func TestLlamaFrameAtCoversEveryTick(t *testing.T) {
-	seen := map[string]bool{}
-	for tick := range nodTicks * blinkPeriod * 2 {
-		seen[strings.Join(llamaFrameAt(tick), "")] = true
-	}
-	if len(seen) != len(llamaFrames) {
-		t.Errorf("the animation only ever shows %d of the %d frames", len(seen), len(llamaFrames))
-	}
-}
-
 // A glyph whose rows disagree about their width shifts every letter after it
 // along by the difference, which turns the wordmark into a staircase.
 func TestWordmarkGlyphsAreRectangular(t *testing.T) {
@@ -148,12 +120,12 @@ func TestWelcomeEscDoesNotQuit(t *testing.T) {
 	}
 }
 
-// The menu opens on Ablation — that's the headline feature, and pressing
-// enter without touching an arrow key should lead straight to it.
-func TestWelcomeOpensOnAblation(t *testing.T) {
+// The menu opens on Attention — the top of the trace-tool section — and
+// pressing enter without touching an arrow key should lead straight to it.
+func TestWelcomeOpensOnAttention(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	if w.cursor != 0 {
-		t.Errorf("cursor = %d, want 0 (Ablation)", w.cursor)
+		t.Errorf("cursor = %d, want 0 (Attention)", w.cursor)
 	}
 	_, cmd := w.Update(key("enter"))
 	if cmd == nil {
@@ -162,17 +134,18 @@ func TestWelcomeOpensOnAblation(t *testing.T) {
 	if w.Choice() != Run {
 		t.Errorf("Choice() = %v, want Run", w.Choice())
 	}
-	if w.Tool() != ToolAblation {
-		t.Errorf("Tool() = %v, want ToolAblation", w.Tool())
+	if w.Tool() != ToolAttention {
+		t.Errorf("Tool() = %v, want ToolAttention", w.Tool())
 	}
 }
 
-// Every row is a tool now, and enter always means Run — Tool() is what tells
-// them apart, not Choice().
-func TestWelcomeEveryRowPicksATool(t *testing.T) {
-	want := []Tool{ToolAblation, ToolAttention, ToolAttribution, ToolLens, ToolChat}
-	if len(want) != len(menuItems) {
-		t.Fatalf("test covers %d rows, menu has %d", len(want), len(menuItems))
+// Every row but Machine picks a tool, and enter always means Run for those —
+// Tool() is what tells them apart, not Choice(). Machine is highlightable
+// but leads nowhere: it exists for its detail panel, not to be run.
+func TestWelcomeRowsPickATool(t *testing.T) {
+	want := []Tool{ToolAttention, ToolLens, ToolAttribution, ToolAblation, ToolChat, ToolModel}
+	if len(want)+1 != len(menuItems) {
+		t.Fatalf("test covers %d runnable rows + Machine, menu has %d rows", len(want), len(menuItems))
 	}
 	for i, tool := range want {
 		w := NewWelcome(t.TempDir())
@@ -192,6 +165,24 @@ func TestWelcomeEveryRowPicksATool(t *testing.T) {
 		if w.Tool() != tool {
 			t.Errorf("row %d: Tool() = %v, want %v", i, w.Tool(), tool)
 		}
+	}
+}
+
+// Machine is the one row that leads nowhere — enter on it should not end the
+// screen, since there's no tool behind it to run.
+func TestWelcomeMachineRowDoesNotRun(t *testing.T) {
+	w := NewWelcome(t.TempDir())
+	for range len(menuItems) - 1 {
+		w.Update(key("j"))
+	}
+	if got, want := menuItems[w.cursor].title, "Machine"; got != want {
+		t.Fatalf("cursor landed on %q, want %q", got, want)
+	}
+	if _, cmd := w.Update(key("enter")); cmd != nil {
+		t.Error("enter on Machine ended the screen")
+	}
+	if w.Choice() != Quit {
+		t.Errorf("Choice() = %v after enter on Machine, want the safe default", w.Choice())
 	}
 }
 
@@ -238,30 +229,34 @@ func TestWelcomeCursorDoesNotWrap(t *testing.T) {
 }
 
 // The whole point of the menu is that each row explains what pressing enter
-// on it leads to — Ablation's blurb by default, Attention's once highlighted.
+// on it leads to — Attention's blurb by default, Logit Lens's once
+// highlighted — and every row's title is visible at once, tools and Other
+// alike.
 //
-// Resized taller than NewWelcome's own default: five tool rows plus the
-// weights line folded into the machine panel is more content than fits a bare
-// 32-row terminal alongside a detail panel too, the same reason
-// TestViewFitsNarrowTerminal exercises its own explicit sizes rather than
-// relying on the default.
+// Resized taller than NewWelcome's own default: the selector list, its
+// detail box, and the bottom machine row is more content than fits a bare
+// 32-row terminal, the same reason TestViewFitsNarrowTerminal exercises its
+// own explicit sizes rather than relying on the default.
 func TestWelcomeShowsBothMenuRows(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	w.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	view := w.View()
-	for _, want := range []string{"Ablation", "Attention", "This machine"} {
+	for _, want := range []string{"Ablation", "Attention", "Other", "Model", "Machine"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}
 	}
-
-	w.Update(key("j"))
-	view = w.View()
 	// "magnitude" rather than a longer phrase from the blurb: word-wrap in
 	// the panel can legitimately split a phrase across lines at some widths,
 	// and this test cares that the teaser rendered, not exactly how it wrapped.
-	if !strings.Contains(view, "Attention") || !strings.Contains(view, "magnitude") {
-		t.Error("highlighting \"Attention\" did not show its teaser")
+	if !strings.Contains(view, "magnitude") {
+		t.Error("Attention's teaser is not showing by default")
+	}
+
+	w.Update(key("j"))
+	view = w.View()
+	if !strings.Contains(view, "stopped early") {
+		t.Error("highlighting \"Logit Lens\" did not show its teaser")
 	}
 }
 
@@ -293,11 +288,12 @@ func TestViewFitsNarrowTerminal(t *testing.T) {
 	}
 }
 
-// Whatever else changes, the screen has to answer "what am I running on".
+// Whatever else changes, the screen has to answer "what am I running on" —
+// the bottom row says so regardless of which menu row is highlighted.
 func TestViewShowsHardware(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	view := w.View()
-	for _, want := range []string{"This machine", "cores", "memory", "platform", "weights"} {
+	for _, want := range []string{"host", "cores", "memory", "platform", "weights"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}

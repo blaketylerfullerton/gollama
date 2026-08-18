@@ -4,14 +4,14 @@
 // a screen here instead, reached the same way Chat is: pick a tool from the
 // welcome menu, pick a model on the picker, land here already loaded.
 //
-// One screen serves five views (ablation, attention, attribution, logit lens,
-// stages) rather than one screenID per tool, because they already share one
-// engine goroutine, one KV cache, and one step history — switching views is
-// free, it doesn't re-run inference, and ablation specifically depends on
-// comparing against the same baseline run the other views are browsing.
-// Picking a different tool from the welcome menu opens this screen with a
-// different initial view; the in-screen 1-5/tab switcher is still there to
-// cross-check another view of the same run without leaving it.
+// One struct serves four views (ablation, attention, attribution, logit
+// lens) rather than a wholly separate screen per tool, because a real run
+// still has to come from somewhere: whichever tool is picked, this is the one
+// engine goroutine, one KV cache, one step history that runs it. But each
+// welcome-menu tool locks the screen to its own view for as long as it's
+// open — picking Attention shows only the attention grid, picking Logit Lens
+// shows only that, with no in-screen switcher to wander into the others. Each
+// lens is its own thing; what they share is plumbing, not screen space.
 //
 // This file is the one exception to "nothing in tools/tui imports engine/
 // model or engine/tokenizer": it imports tools/trace for Trace/Event, the
@@ -122,7 +122,10 @@ const (
 	InspectQuit
 )
 
-// inspectView is which of the five panes is showing.
+// inspectView is which lens is showing. Fixed for the lifetime of the
+// screen — set once from the welcome-menu tool (see toolInitialView) and
+// never reassigned after — so there is one locked view per tool rather than
+// a shared switcher between them.
 type inspectView int
 
 const (
@@ -130,8 +133,6 @@ const (
 	viewAttention                      // what each head looked at
 	viewAttribution                    // which components moved the answer
 	viewLens                           // how the prediction forms, layer by layer
-	viewStages
-	numInspectViews
 )
 
 func (v inspectView) String() string {
@@ -142,10 +143,24 @@ func (v inspectView) String() string {
 		return "attention"
 	case viewAttribution:
 		return "attribution"
-	case viewLens:
-		return "logit lens"
 	default:
-		return "stages"
+		return "logit lens"
+	}
+}
+
+// Title is String with the header badge's capitalization — its own method
+// rather than strings.Title(String()), since "logit lens" needs both words
+// capitalized.
+func (v inspectView) Title() string {
+	switch v {
+	case viewAblation:
+		return "Ablation"
+	case viewAttention:
+		return "Attention"
+	case viewAttribution:
+		return "Attribution"
+	default:
+		return "Logit Lens"
 	}
 }
 
@@ -178,20 +193,13 @@ const (
 // inspectStep is one traced forward pass: the prefill, or one generated
 // token.
 type inspectStep struct {
-	label   string
-	tr      *trace.Trace
-	layers  map[int][]trace.Event
-	outside []trace.Event
-	lens    []trace.Event
+	label string
+	tr    *trace.Trace
+	lens  []trace.Event
 }
 
 func newInspectStep(label string, tr *trace.Trace) inspectStep {
-	layers, outside := tr.ByLayer()
-	return inspectStep{
-		label: label, tr: tr,
-		layers: layers, outside: outside,
-		lens: tr.Kind(trace.KindLogitLens),
-	}
+	return inspectStep{label: label, tr: tr, lens: tr.Kind(trace.KindLogitLens)}
 }
 
 // Inspect is the bubbletea model for the pass-inspection screen.
@@ -221,6 +229,14 @@ type Inspect struct {
 	layer int
 	head  int
 	w, h  int
+
+	// Attention. attnQuery is which query token's row is in focus — see
+	// attentionBarsView and attentionTraceView — cycled with tab/shift+tab
+	// now that those keys aren't a view switcher any more. attnTrace toggles
+	// between that token's per-(layer,head) bar chart and its per-layer
+	// trace, the two attentionView draws.
+	attnQuery int
+	attnTrace bool
 
 	// Ablation. ablateOn is whether the currently selected (layer, head) is
 	// being forced to zero for comparison; ablateSteps holds that shadow
@@ -289,6 +305,23 @@ func (a *Inspect) config() trace.ModelInfo {
 		return s.tr.Header.Config
 	}
 	return a.info
+}
+
+// attnQueryCount is how many query-token rows the current step's selected
+// (layer, head) has to cycle attnQuery through. Not the model's declared
+// sequence length: a long prompt can be skipped entirely (see
+// attentionEvent's MaxAttentionTokens), and this has to agree with whatever
+// attentionView actually finds.
+func (a *Inspect) attnQueryCount() int {
+	s := a.active()
+	if s == nil {
+		return 0
+	}
+	e, ok := s.tr.LayerEvent(a.layer, trace.KindAttention, a.head)
+	if !ok {
+		return 0
+	}
+	return len(e.Weights)
 }
 
 func (a *Inspect) Init() tea.Cmd {
@@ -402,22 +435,26 @@ func (a *Inspect) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a.input.Focus()
 			return a, tea.Batch(textinput.Blink, a.requestPreview())
 		}
-	case "tab", "]":
-		a.view = (a.view + 1) % numInspectViews
-	case "shift+tab", "[":
-		a.view = (a.view + numInspectViews - 1) % numInspectViews
-	case "1":
-		a.view = viewAblation
-	case "2":
-		a.view = viewAttention
-	case "3":
-		a.view = viewAttribution
-	case "4":
-		a.view = viewLens
-	case "5":
-		a.view = viewStages
 	case "a":
-		return a, a.toggleAblate()
+		if a.view == viewAblation {
+			return a, a.toggleAblate()
+		}
+	case "tab", "]":
+		if a.view == viewAttention {
+			if n := a.attnQueryCount(); n > 0 {
+				a.attnQuery = (a.attnQuery + 1) % n
+			}
+		}
+	case "shift+tab", "[":
+		if a.view == viewAttention {
+			if n := a.attnQueryCount(); n > 0 {
+				a.attnQuery = (a.attnQuery + n - 1) % n
+			}
+		}
+	case "t":
+		if a.view == viewAttention {
+			a.attnTrace = !a.attnTrace
+		}
 	case "up", "k":
 		a.layer = max(0, a.layer-1)
 	case "down", "j":
@@ -427,9 +464,13 @@ func (a *Inspect) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "G", "end":
 		a.layer = max(0, cfg.NLayer-1)
 	case "left", "h":
-		a.head = max(0, a.head-1)
+		if a.view != viewLens {
+			a.head = max(0, a.head-1)
+		}
 	case "right", "l":
-		a.head = min(max(0, cfg.NHead-1), a.head+1)
+		if a.view != viewLens {
+			a.head = min(max(0, cfg.NHead-1), a.head+1)
+		}
 	case "n", ".", "pgdown":
 		a.cur = min(len(a.steps)-1, a.cur+1)
 	case "p", ",", "pgup":
@@ -507,29 +548,39 @@ func (a *Inspect) toggleAblate() tea.Cmd {
 	}
 }
 
+// View lays out through the shared frame — see layout.go's screen() — rather
+// than just stacking header/body/keys itself, the way this screen used to.
+// That was the bug: the keys line floated wherever the content above it
+// stopped, so it landed at a different row every time the view changed
+// height. screen() pins the bar to the bottom of the terminal and pads
+// whatever's left, the same frame every other screen in this package already
+// uses, so the controls are always in the same place.
 func (a *Inspect) View() string {
+	bar := a.bar()
+
 	if a.err != nil {
-		return a.header() + "\n " + warnStyle.Render("error: "+a.err.Error()) +
-			"\n\n " + dimStyle.Render("i to edit the prompt · esc to go back") + "\n"
+		body := lipgloss.JoinVertical(lipgloss.Left, a.header(),
+			" "+warnStyle.Render("error: "+a.err.Error()))
+		return screen(a.w, a.h, body, bar)
 	}
 	if a.active() == nil {
-		return a.header() + "\n " + dimStyle.Render(a.status) + "\n" + a.footer()
+		body := lipgloss.JoinVertical(lipgloss.Left, a.header(), " "+dimStyle.Render(a.status))
+		return screen(a.w, a.h, body, bar)
 	}
 
-	body := ""
+	view := ""
 	switch a.view {
 	case viewAblation:
-		body = a.ablationView()
+		view = a.ablationView()
 	case viewAttention:
-		body = a.attentionView()
+		view = a.attentionView()
 	case viewAttribution:
-		body = a.attributionView()
+		view = a.attributionView()
 	case viewLens:
-		body = a.lensView()
-	case viewStages:
-		body = a.stagesView()
+		view = a.lensView()
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, a.header(), body, a.footer())
+	body := lipgloss.JoinVertical(lipgloss.Left, a.header(), view)
+	return screen(a.w, a.h, body, bar)
 }
 
 // --- chrome -----------------------------------------------------------------
@@ -554,16 +605,7 @@ func (a *Inspect) header() string {
 		lines = append(lines, a.stepStrip())
 	}
 
-	tabs := make([]string, numInspectViews)
-	for v := inspectView(0); v < numInspectViews; v++ {
-		label := fmt.Sprintf(" %d %s ", v+1, v)
-		if v == a.view {
-			tabs[v] = activeTabStyle.Render(label)
-		} else {
-			tabs[v] = tabStyle.Render(label)
-		}
-	}
-	lines = append(lines, " "+strings.Join(tabs, " "), "")
+	lines = append(lines, " "+activeTabStyle.Render(" "+a.view.Title()+" "), "")
 	return strings.Join(lines, "\n")
 }
 
@@ -625,21 +667,43 @@ func (a *Inspect) stepStrip() string {
 	return b.String()
 }
 
-func (a *Inspect) footer() string {
+// bar is the toolbar pinned along the bottom — see View — with whichever
+// keys apply to what's currently on screen.
+func (a *Inspect) bar() string {
 	var keys []string
-	if a.phase == inspectEditing {
+	switch {
+	case a.err != nil:
+		// A dead screen: nothing to navigate, just a way back to a live one.
+		keys = []string{"i to edit the prompt", "esc to go back"}
+	case a.phase == inspectEditing:
 		keys = []string{"enter run", "+/- tokens", "esc browse", "ctrl+c quit"}
-	} else {
-		keys = []string{"↑↓ layer", "←→ head", "tab view"}
+	default:
+		keys = []string{"↑↓ layer"}
+		// Lens has no head axis — it reads straight down the depth of the
+		// model, not across one layer's heads.
+		if a.view != viewLens {
+			keys = append(keys, "←→ head")
+		}
+		if a.view == viewAttention {
+			keys = append(keys, "tab token")
+			if a.attnTrace {
+				keys = append(keys, "t bars")
+			} else {
+				keys = append(keys, "t trace")
+			}
+		}
 		if len(a.steps) > 1 {
 			keys = append(keys, "n/p step")
 		}
+		if a.view == viewAblation && a.live() {
+			keys = append(keys, "a ablate head")
+		}
 		if a.live() {
-			keys = append(keys, "a ablate head", "i prompt")
+			keys = append(keys, "i prompt")
 		}
 		keys = append(keys, "esc back", "q quit")
 	}
-	return "\n" + dimStyle.Render(" "+strings.Join(keys, " · "))
+	return toolbar(a.w, strings.Join(keys, dimStyle.Render(" · ")), "")
 }
 
 // finalPrediction is the lens readout past the last block — the model's actual
@@ -657,16 +721,13 @@ func (a *Inspect) finalPrediction() *trace.Candidate {
 	return nil
 }
 
-// bodyHeight is what's left for a view after the header and footer.
+// bodyHeight is what's left for a view once the header above it and the
+// pinned bar below it (see View) have taken their rows. Measured against the
+// real header and bar rather than a hand-counted constant, so a wider
+// terminal wrapping the bar onto two lines — or a step strip appearing —
+// shrinks this instead of the view silently overrunning it.
 func (a *Inspect) bodyHeight() int {
-	chrome := 7
-	if len(a.steps) > 1 {
-		chrome++
-	}
-	if a.phase == inspectEditing {
-		chrome += 2 // tokenization preview and the hint line
-	}
-	return max(3, a.h-chrome)
+	return max(3, bodyRows(a.h, a.bar())-lipgloss.Height(a.header()))
 }
 
 // formatTokenPreview renders the first n token strings with a separator, the

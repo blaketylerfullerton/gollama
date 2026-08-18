@@ -113,6 +113,12 @@ func fixture() *trace.Trace {
 
 // --- rendering ---------------------------------------------------------------
 
+// allInspectViews is every locked view a welcome-menu tool can open Inspect
+// on — see toolInitialView. There's no cycling between them any more, so
+// tests that want to check every view exercise this list directly rather
+// than looping a live cursor through them.
+var allInspectViews = []inspectView{viewAblation, viewAttention, viewAttribution, viewLens}
+
 // Every view must render at a range of sizes without panicking — index errors in
 // terminal layout code are easy to write and invisible until someone resizes.
 func TestInspectAllViewsRender(t *testing.T) {
@@ -124,7 +130,7 @@ func TestInspectAllViewsRender(t *testing.T) {
 	}
 
 	for _, size := range sizes {
-		for v := inspectView(0); v < numInspectViews; v++ {
+		for _, v := range allInspectViews {
 			a := NewInspectFile(fixture())
 			a.Update(size)
 			a.view = v
@@ -132,10 +138,69 @@ func TestInspectAllViewsRender(t *testing.T) {
 			if out == "" {
 				t.Errorf("view %v at %dx%d rendered nothing", v, size.Width, size.Height)
 			}
-			if !strings.Contains(out, "GoLlama inspect") {
+			// The pinned bar has to survive even when the terminal is too
+			// short to also fit the header — screen() clips the body rather
+			// than push the toolbar (and the quit key on it) off screen; see
+			// layout.go.
+			if !strings.Contains(out, "quit") {
+				t.Errorf("view %v at %dx%d lost its pinned control bar", v, size.Width, size.Height)
+			}
+			if size.Height >= 10 && !strings.Contains(out, "GoLlama inspect") {
 				t.Errorf("view %v at %dx%d lost its header", v, size.Width, size.Height)
 			}
 		}
+	}
+}
+
+// The bar of keys along the bottom used to float wherever the view above it
+// stopped — it moved a different number of rows up the screen depending on
+// how tall the current view's content was. Now that View() goes through the
+// same screen() frame as every other screen (see layout.go), the bar always
+// lands on the last row and the frame always fills the terminal to exactly
+// its height, at every size and in every phase.
+//
+// This only checks row count, not line width the way picker_test.go's
+// TestScreensFillTheTerminal does for the picker and welcome screens: those
+// wrap their content in width-bound panels, but Inspect's per-view rows
+// (attention bars, attribution tables, and the like) never have been — a
+// separate, pre-existing gap this change doesn't touch.
+func TestInspectFillsTheTerminal(t *testing.T) {
+	sizes := []tea.WindowSizeMsg{
+		{Width: 80, Height: 24},
+		{Width: 100, Height: 40},
+		{Width: 200, Height: 60},
+		{Width: 60, Height: 20},
+	}
+
+	for _, size := range sizes {
+		for _, v := range allInspectViews {
+			a := NewInspectFile(fixture())
+			a.Update(size)
+			a.view = v
+			checkFillsTerminal(t, "inspect/"+v.String(), a.View(), size)
+		}
+
+		// The loading and error phases go through different early-return
+		// branches in View() — both have to fill the frame too.
+		ch := make(chan tea.Msg, 4)
+		loading := NewInspectLive(ch, make(chan InspectRequest, 1), "", 3, viewLens)
+		loading.Update(size)
+		checkFillsTerminal(t, "inspect/loading", loading.View(), size)
+
+		erred := NewInspectLive(ch, make(chan InspectRequest, 1), "", 3, viewLens)
+		erred.Update(size)
+		erred.Update(InspectErr{Err: errors.New("boom")})
+		checkFillsTerminal(t, "inspect/error", erred.View(), size)
+	}
+}
+
+// checkFillsTerminal asserts view is exactly size.Height rows — the frame
+// invariant screen() is responsible for, whatever the content inside it does.
+func checkFillsTerminal(t *testing.T, name, view string, size tea.WindowSizeMsg) {
+	t.Helper()
+	lines := strings.Split(view, "\n")
+	if len(lines) != size.Height {
+		t.Errorf("%s at %dx%d is %d rows, want %d", name, size.Width, size.Height, len(lines), size.Height)
 	}
 }
 
@@ -157,17 +222,24 @@ func TestInspectLensViewShowsProgression(t *testing.T) {
 	}
 }
 
-func TestInspectAttentionViewShowsMaskAndSink(t *testing.T) {
+// The fixture's third token attends 0.5/0.3/0.2 over The/capital/is — enough
+// to check the bar labels, the top-attended callout, and the head's sink
+// stat all in one query token's row.
+func TestInspectAttentionBarsViewShowsWeightsAndSink(t *testing.T) {
 	a := NewInspectFile(fixture())
 	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	a.view = viewAttention
+	a.attnQuery = 2
 	out := a.View()
 
-	if !strings.Contains(out, "·") {
-		t.Error("attention view should mark masked positions")
-	}
 	if !strings.Contains(out, "_capital") {
-		t.Error("attention view should label axes with token text, spaces made visible")
+		t.Error("attention view should label bars with token text, spaces made visible")
+	}
+	if !strings.Contains(out, "50.0%") {
+		t.Errorf("attention view should show the query token's own weights:\n%s", out)
+	}
+	if !strings.Contains(out, `attends most to "The"`) {
+		t.Errorf("attention view should call out the top-weighted token:\n%s", out)
 	}
 	// Rows 1 and 2 give token 0 weights 0.8 and 0.5, averaging 65%.
 	if !strings.Contains(out, "65%") {
@@ -175,17 +247,58 @@ func TestInspectAttentionViewShowsMaskAndSink(t *testing.T) {
 	}
 }
 
-func TestInspectStagesViewShowsNormsAndNotes(t *testing.T) {
+// tab/shift+tab used to cycle the whole screen's view; now that each tool
+// locks its view, they're free to move the attention screen's focused query
+// token instead — see attnQueryCount.
+func TestInspectAttentionTokenCycling(t *testing.T) {
 	a := NewInspectFile(fixture())
-	a.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	a.view = viewStages
-	a.layer = 1
-	out := a.View()
+	a.view = viewAttention // fixture rows: 3 query tokens at every layer
 
-	for _, want := range []string{"input norm", "+ mlp residual", "gate 51% negative", "rotary"} {
+	if a.attnQuery != 0 {
+		t.Fatalf("attnQuery starts at %d, want 0", a.attnQuery)
+	}
+	a.Update(key("tab"))
+	if a.attnQuery != 1 {
+		t.Errorf("tab should advance attnQuery, got %d", a.attnQuery)
+	}
+	a.Update(key("tab"))
+	a.Update(key("tab")) // 1 -> 2 -> wraps to 0
+	if a.attnQuery != 0 {
+		t.Errorf("attnQuery should wrap forward, got %d", a.attnQuery)
+	}
+	a.Update(key("shift+tab"))
+	if a.attnQuery != 2 {
+		t.Errorf("shift+tab should wrap backward, got %d", a.attnQuery)
+	}
+}
+
+// "t" toggles the trace view, which follows one query token down through
+// every layer instead of showing one layer/head's bars.
+func TestInspectAttentionTraceViewFollowsQueryAcrossLayers(t *testing.T) {
+	a := NewInspectFile(fixture())
+	a.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	a.view = viewAttention
+	a.attnQuery = 2
+	a.Update(key("t"))
+	if !a.attnTrace {
+		t.Fatal("t should toggle the trace view on")
+	}
+
+	out := a.View()
+	for _, want := range []string{"tracing", `"_is"`, "The", "50.0%"} {
 		if !strings.Contains(out, want) {
-			t.Errorf("stages view is missing %q", want)
+			t.Errorf("trace view is missing %q:\n%s", want, out)
 		}
+	}
+	// Every layer in the fixture records identical weights for head 0, so the
+	// top target never moves — the view should say so.
+	if !strings.Contains(out, "settles on") {
+		t.Errorf("trace view should call out where the target stabilizes:\n%s", out)
+	}
+
+	a.Update(key("t"))
+	if a.attnTrace {
+		t.Error("t should toggle the trace view back off")
 	}
 }
 
@@ -217,6 +330,7 @@ func TestInspectLayerNavigationClamps(t *testing.T) {
 
 func TestInspectHeadNavigationClamps(t *testing.T) {
 	a := NewInspectFile(fixture())
+	a.view = viewAttention // lens has no head axis, see handleKey
 	for i := 0; i < 20; i++ {
 		a.Update(key("right"))
 	}
@@ -231,19 +345,19 @@ func TestInspectHeadNavigationClamps(t *testing.T) {
 	}
 }
 
-func TestInspectViewCycling(t *testing.T) {
-	a := NewInspectFile(fixture())
-	seen := map[inspectView]bool{a.view: true}
-	for i := 0; i < int(numInspectViews); i++ {
-		a.Update(key("tab"))
-		seen[a.view] = true
-	}
-	if len(seen) != int(numInspectViews) {
-		t.Errorf("cycling visited %d of %d views", len(seen), numInspectViews)
-	}
-	// A full cycle must return to the start.
-	if a.view != viewLens {
-		t.Errorf("after a full cycle the view is %v, want %v", a.view, viewLens)
+// Each tool locks Inspect to its own view for the rest of the session — no
+// in-screen switcher left to wander into the others, including the keys that
+// used to drive one.
+func TestInspectViewIsLockedToTheTool(t *testing.T) {
+	for _, v := range allInspectViews {
+		a := NewInspectFile(fixture())
+		a.view = v
+		for _, k := range []string{"tab", "shift+tab", "]", "[", "1", "2", "3", "4", "5"} {
+			a.Update(key(k))
+			if a.view != v {
+				t.Errorf("key %q changed the locked view from %v to %v", k, v, a.view)
+			}
+		}
 	}
 }
 
@@ -409,7 +523,7 @@ func TestInspectLiveShowsStatusBeforeFirstStep(t *testing.T) {
 		t.Errorf("expected the status to render, got:\n%s", out)
 	}
 	// No step yet, so every view must degrade rather than index into nothing.
-	for v := inspectView(0); v < numInspectViews; v++ {
+	for _, v := range allInspectViews {
 		a.view = v
 		if a.View() == "" {
 			t.Errorf("view %v rendered nothing with no steps", v)
@@ -502,7 +616,7 @@ func TestInspectNavigationSurvivesShorterStep(t *testing.T) {
 		Config: trace.ModelInfo{NLayer: 1, NHead: 1},
 	}}
 	ch := make(chan tea.Msg, 4)
-	a := NewInspectLive(ch, make(chan InspectRequest, 1), "", 3, viewLens)
+	a := NewInspectLive(ch, make(chan InspectRequest, 1), "", 3, viewAttention)
 	a.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 
 	feed(t, a, InspectStep{Label: "big", Tr: fixture()})

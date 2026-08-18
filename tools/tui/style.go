@@ -33,7 +33,6 @@ var (
 	// be the loudest text in its section, which is what it is.
 	headingStyle = amber.NFg(amber.Strong).Bold(true)
 	warnStyle    = lipgloss.NewStyle().Foreground(amber.Alert).Bold(true)
-	llamaStyle   = amber.Fg(amber.Accent)
 	// Keys carry the hue and their descriptions don't, so a toolbar reads as a
 	// row of pressable things with grey annotations rather than as an
 	// undifferentiated strip of text.

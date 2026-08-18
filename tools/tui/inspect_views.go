@@ -13,7 +13,7 @@ import (
 )
 
 // This is where the two tracks earn their keep — see tools/amber. The
-// attention matrix and the logit-lens bars are coloured by calling amber.Of on
+// attention bars and the logit-lens bars are coloured by calling amber.Of on
 // the number itself, and everything around them is grey, so the only saturated
 // thing in the frame is the data. Chrome shared with the rest of the package —
 // titleStyle, dimStyle, keyStyle, warnStyle, headingStyle, selectedStyle,
@@ -101,7 +101,24 @@ func (a *Inspect) lensView() string {
 }
 
 // --- attention --------------------------------------------------------------
+//
+// This used to be one full N×N matrix for a single (layer, head) — every
+// query row at once, columns coloured by magnitude. Readable for a handful of
+// tokens, but it doesn't scale: past a short prompt it's a wall of numbers,
+// and there was no way to follow one token's story rather than the whole
+// grid's. Two focused views replace it, both centred on a single query token
+// (a.attnQuery, cycled with tab/shift+tab — see handleKey):
+//
+//   - the default, attentionBarsView: that token's weights over everything at
+//     or before it, one layer/head at a time, as a bar chart — the same shape
+//     as attentionExample() on the welcome screen, live instead of a mockup.
+//   - attentionTraceView (toggled with "t"): the same token, but walking
+//     every layer at the selected head, showing which earlier token it
+//     attended to the most at each depth — the attention analogue of what
+//     lensView already does for predictions.
 
+// attentionView dispatches to whichever of the two the screen is currently
+// showing; both need the same (layer, head) lookup and token-label function.
 func (a *Inspect) attentionView() string {
 	s := a.active()
 	if s == nil {
@@ -117,43 +134,47 @@ func (a *Inspect) attentionView() string {
 	toks := s.tr.Header.Tokens
 	label := func(i int) string {
 		if i < len(toks) {
-			return truncate(sanitize(toks[i].Text), 8)
+			return truncate(sanitize(toks[i].Text), 12)
 		}
 		return fmt.Sprintf("t%d", i)
 	}
+	// Clamped rather than trusted: attnQuery is only reclamped on the key that
+	// moves it (see handleKey), the same lag every other cursor in this screen
+	// tolerates between steps of different lengths.
+	q := min(a.attnQuery, len(e.Weights)-1)
+
+	if a.attnTrace {
+		return a.attentionTraceView(s, q, label)
+	}
+	return a.attentionBarsView(e, q, label)
+}
+
+// attentionBarsView shows one query token's weights over every token at or
+// before it — a single row out of what used to be the whole matrix, wide
+// enough to read at a glance instead of squinting at a grid.
+func (a *Inspect) attentionBarsView(e trace.Event, q int, label func(int) string) string {
+	row := e.Weights[q][:q+1]
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  layer %s  head %s   %s\n\n",
+	b.WriteString(fmt.Sprintf("  layer %s  head %s   query %s  %s\n\n",
 		keyStyle.Render(fmt.Sprint(a.layer)), keyStyle.Render(fmt.Sprint(a.head)),
-		dimStyle.Render("each row attends across the columns")))
+		headingStyle.Render(truncate(fmt.Sprintf("%q", label(q)), 14)),
+		dimStyle.Render(fmt.Sprintf("(token %d of %d)", q, len(e.Weights)-1))))
 
-	// Column headings.
-	b.WriteString(headerRowStyle.Render(fmt.Sprintf("  %-9s", "")))
-	for j := range e.Weights {
-		b.WriteString(headerRowStyle.Render(fmt.Sprintf("%9s", label(j))))
-	}
-	b.WriteString("\n")
-
-	for i, row := range e.Weights {
-		b.WriteString(fmt.Sprintf("  %-9s", label(i)))
-		for j := range e.Weights {
-			if j > i {
-				// Never computed, not zeroed — the mask means these scores
-				// don't exist. Drawn at the bottom of the ramp, below anything
-				// a real weight can reach: on a scale where brightness is
-				// magnitude, the absence of a number can't be allowed to
-				// outshine a small one. The glyph is what says "masked"; the
-				// darkness only says "nothing to see".
-				b.WriteString(amber.Fg(amber.Ash).Render(fmt.Sprintf("%9s", "·")))
-				continue
-			}
-			w := row[j]
-			b.WriteString(heat(w).Render(fmt.Sprintf("%9.3f", w)))
+	// Anchored on the query token itself (the last entry) rather than 0, so a
+	// long prefix scrolls to show what's nearest it first.
+	lo, hi := window(len(row), len(row)-1, a.bodyHeight()-2)
+	top, topW := 0, float32(0)
+	for i := lo; i < hi; i++ {
+		w := row[i]
+		if w > topW {
+			top, topW = i, w
 		}
-		b.WriteString("\n")
+		b.WriteString(fmt.Sprintf("  %-12s %s %5.1f%%\n", label(i), bar(float64(w), 24), w*100))
 	}
 
-	b.WriteString("\n" + dimStyle.Render("  · = masked. Each row sums to 1."))
+	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf(
+		"  attends most to %s (%.0f%%)", fmt.Sprintf("%q", label(top)), topW*100)))
 	if len(e.Weights) > 1 {
 		var sink float64
 		for i := 1; i < len(e.Weights); i++ {
@@ -161,22 +182,77 @@ func (a *Inspect) attentionView() string {
 		}
 		sink /= float64(len(e.Weights) - 1)
 		b.WriteString(dimStyle.Render(fmt.Sprintf(
-			"\n  token 0 absorbs %.0f%% of later positions' attention on average", sink*100)))
+			"\n  this head's sink: token 0 gets %.0f%% of later positions' attention on average", sink*100)))
 	}
 	return b.String()
 }
 
-// heat colours a weight by magnitude, so a pattern is visible before any number
-// is read.
-//
-// It was a six-colour rainbow — grey, blue, green, yellow, red — which had the
-// flaw every rainbow scale has: the steps aren't ordered by anything the eye
-// does automatically, so you can see that two cells differ without being able
-// to see which one is larger, and reading the matrix meant consulting a legend
-// you had to hold in your head. On the ramp, larger is brighter, and a row's
-// shape falls out of it at a glance.
-func heat(w float32) lipgloss.Style {
-	return lipgloss.NewStyle().Foreground(amber.Of(float64(w)))
+// attentionTraceView follows one query token down through every layer at the
+// selected head, showing which earlier token it leaned on hardest at each
+// depth — whether that target holds steady or drifts as the representation
+// deepens.
+func (a *Inspect) attentionTraceView(s *inspectStep, q int, label func(int) string) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("  tracing %s   head %s\n\n",
+		headingStyle.Render(truncate(fmt.Sprintf("%q", label(q)), 14)),
+		keyStyle.Render(fmt.Sprint(a.head))))
+	b.WriteString(headerRowStyle.Render(
+		fmt.Sprintf("  %-5s %-14s %6s  %s", "layer", "attends to", "wt", "")) + "\n")
+
+	nLayer := s.tr.Header.Config.NLayer
+	lastTarget, firstStable := -1, -1
+	for l := 0; l < nLayer; l++ {
+		e, ok := s.tr.LayerEvent(l, trace.KindAttention, a.head)
+		if !ok || q >= len(e.Weights) {
+			continue
+		}
+		idx, w := argmax(e.Weights[q][:q+1])
+
+		if idx == lastTarget {
+			if firstStable < 0 {
+				firstStable = l
+			}
+		} else {
+			firstStable = -1
+		}
+		lastTarget = idx
+
+		text := fmt.Sprintf("%q", label(idx))
+		if idx == q {
+			text += " (self)"
+		}
+		row := fmt.Sprintf("  %-5d %-14s %5.1f%%  %s", l, truncate(text, 14), w*100, bar(float64(w), 16))
+
+		switch {
+		case l == a.layer:
+			b.WriteString(selectedStyle.Render(row))
+		case l == firstStable:
+			b.WriteString(headingStyle.Render(row))
+		default:
+			b.WriteString(row)
+		}
+		b.WriteString("\n")
+	}
+
+	if firstStable >= 0 {
+		b.WriteString("\n" + dimStyle.Render(fmt.Sprintf(
+			"  settles on %s from layer %d on (highlighted)",
+			fmt.Sprintf("%q", label(lastTarget)), firstStable)))
+	}
+	return b.String()
+}
+
+// argmax is the index and value of the largest entry in v. Attention rows are
+// never empty by the time this is called — q is clamped against a row that
+// exists, and a trace row is always at least the self-attention entry.
+func argmax(v []float32) (int, float32) {
+	bi, bv := 0, v[0]
+	for i, x := range v[1:] {
+		if x > bv {
+			bi, bv = i+1, x
+		}
+	}
+	return bi, bv
 }
 
 // --- attribution --------------------------------------------------------------
@@ -407,52 +483,6 @@ func (a *Inspect) ablationView() string {
 	return b.String()
 }
 
-// --- stages -----------------------------------------------------------------
-
-func (a *Inspect) stagesView() string {
-	s := a.active()
-	if s == nil {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  layer %s\n\n", keyStyle.Render(fmt.Sprint(a.layer))))
-
-	events := s.layers[a.layer]
-	if len(events) == 0 {
-		return b.String() + dimStyle.Render("  No events recorded for this layer.")
-	}
-
-	for _, e := range events {
-		switch e.Kind {
-		case trace.KindStage:
-			b.WriteString(fmt.Sprintf("  %-24s %s  %s\n",
-				e.Name,
-				keyStyle.Render(fmt.Sprintf("‖x‖ %10.4f", e.MeanNorm)),
-				dimStyle.Render(fmt.Sprintf("(%d tokens x %d dims)", e.Tokens, e.Dims))))
-			if len(e.Preview) > 0 {
-				b.WriteString(dimStyle.Render("    " + floats(e.Preview, 8) + "\n"))
-			}
-		case trace.KindRotary:
-			if e.Head != a.head {
-				continue
-			}
-			b.WriteString(fmt.Sprintf("  %-24s %s\n",
-				fmt.Sprintf("rotary q (head %d)", e.Head),
-				dimStyle.Render(fmt.Sprintf("‖v‖ %.4f → %.4f, cos %.4f",
-					e.NormIn, e.NormOut, e.CosSim))))
-			if e.NormIn > 0 {
-				// Rotation is length-preserving; this is the check.
-				drift := (e.NormOut - e.NormIn) / e.NormIn
-				b.WriteString(dimStyle.Render(fmt.Sprintf(
-					"    length drift %.2e — rotation only turns the vector\n", drift)))
-			}
-		case trace.KindNote:
-			b.WriteString(dimStyle.Render("  note: " + e.Text + "\n"))
-		}
-	}
-	return b.String()
-}
-
 // --- small helpers ----------------------------------------------------------
 
 // bar draws a fraction as a filled row. The fill is coloured by the same
@@ -464,21 +494,6 @@ func bar(frac float64, width int) string {
 	n = max(0, min(width, n))
 	return lipgloss.NewStyle().Foreground(amber.Of(frac)).Render(strings.Repeat("█", n)) +
 		amber.NFg(amber.Rule).Render(strings.Repeat("░", width-n))
-}
-
-func floats(v []float32, n int) string {
-	if n > len(v) {
-		n = len(v)
-	}
-	parts := make([]string, n)
-	for i := 0; i < n; i++ {
-		parts[i] = fmt.Sprintf("%+.4f", v[i])
-	}
-	s := strings.Join(parts, " ")
-	if len(v) > n {
-		s += fmt.Sprintf(" … %d dims", len(v))
-	}
-	return s
 }
 
 func truncate(s string, n int) string {
