@@ -69,7 +69,7 @@ The picker is where the memory arithmetic that actually matters happens: every m
  ╰──────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
 ```
 
-Pressing enter on an installed model opens the third screen: a chat with it. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation the inspect screen (below) uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" (`h` on the welcome menu) lets you reopen and replay any of them later without reloading a model.
+Pressing enter on an installed model opens the third screen: a chat with it. Every turn is wrapped in Qwen3's ChatML markers (`<|im_start|>`/`<|im_end|>`) with a short default system prompt — that formatting is what turns a base model's next-token prediction into an assistant reply, and `chatTemplate` in `chat.go` builds it via `Tokenizer.TokenID` rather than `Encode`, since `Encode` never maps a literal `<|im_start|>` typed inside text to its id, only bytes. Models whose tokenizer has no chat markers at all (the built-in tiny random model) fall back to the old plain-text behavior. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation the inspect screen (below) uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" (`h` on the welcome menu) lets you reopen and replay any of them later without reloading a model.
 
 Pressing enter on one marked "get it" instead fetches it: a progress screen (`tools/hf/`) pulls `config.json`, `tokenizer.json`, and the weights straight off HuggingFace — resuming a shard that's already on disk at the right size rather than restarting it — then drops you into chat the moment it lands. Nothing runs in another terminal. A fresh clone with nothing downloaded yet still has the built-in "tiny random model" entry, so every screen works before you fetch any weights. The equivalent by hand, if you'd rather:
 
@@ -443,7 +443,6 @@ BenchmarkRealDecode-10     2     483599854 ns/op   one cached decode step
 ## Not implemented yet
 
 - **Batching.** One sequence at a time. Continuous batching across concurrent requests is the next architectural step after the tensor layout work — the cache being separate from `GPT` is what leaves room for it.
-- **Chat templates.** `added_tokens` are loaded and decode correctly, but `Encode` doesn't yet split special tokens out of input text, so `<|im_start|>` in a prompt gets byte-level encoded rather than mapped to its id.
 - **Performance.** See above. Nothing is optimized.
 - **Exact numeric verification.** The `" Paris"` test proves the architecture is right in every way that changes the ranking, but a small error — a misplaced epsilon, say — could still shift logits slightly without being caught. A golden-logits comparison against `transformers` would close that gap.
 

@@ -124,13 +124,7 @@ func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- 
 			continue
 		}
 
-		ids := s.tok.Encode(text)
-		if turn > 0 {
-			// Turns after the first are a continuation of the transcript, not
-			// a new prompt, so they need a separator or the model reads the
-			// two as one run-on sentence with no boundary between them.
-			ids = append(s.tok.Encode("\n\n"), ids...)
-		}
+		ids := chatTemplate(s.tok, turn, text)
 		if len(ids) == 0 {
 			if !emit(ctx, out, tui.ChatErr{Err: fmt.Errorf("that produced no tokens to run")}) {
 				return
@@ -197,6 +191,69 @@ func chatEngine(ctx context.Context, dir string, reqs <-chan string, out chan<- 
 			return
 		}
 	}
+}
+
+// defaultSystemPrompt is what turns a base model's next-token prediction into
+// an assistant reply. Without it — and without the <|im_start|> role markers
+// chatTemplate wraps around every turn — Qwen3 just continues whatever text
+// it's handed instead of answering it, since chat behavior lives entirely in
+// this prompt formatting, not in the architecture.
+const defaultSystemPrompt = "You are a helpful assistant."
+
+// chatTemplate wraps one turn of typed text in Qwen3's ChatML markers, the
+// format its instruction tuning was done against. Turn zero also opens with
+// a system message; later turns first close the previous assistant reply,
+// which never got its own <|im_end|> — the decode loop below stops the
+// instant it samples that token rather than emitting and appending it.
+//
+// Falls back to the old plain-text-plus-separator behavior when the
+// tokenizer doesn't know <|im_start|>/<|im_end|> at all, which is true of
+// the tiny demo/random model's tokenizer fixture — there's nothing to wrap
+// with there, so the fallback is what lets that model keep working.
+func chatTemplate(tok *tokenizer.Tokenizer, turn uint64, text string) []int {
+	imStart, ok1 := tok.TokenID("<|im_start|>")
+	imEnd, ok2 := tok.TokenID("<|im_end|>")
+	if !ok1 || !ok2 {
+		ids := tok.Encode(text)
+		if turn > 0 {
+			ids = append(tok.Encode("\n\n"), ids...)
+		}
+		return ids
+	}
+
+	var ids []int
+	if turn == 0 {
+		ids = append(ids, imStart)
+		ids = append(ids, tok.Encode("system\n"+defaultSystemPrompt)...)
+		ids = append(ids, imEnd)
+		ids = append(ids, tok.Encode("\n")...)
+	} else {
+		ids = append(ids, imEnd)
+		ids = append(ids, tok.Encode("\n")...)
+	}
+	ids = append(ids, imStart)
+	ids = append(ids, tok.Encode("user\n"+text)...)
+	ids = append(ids, imEnd)
+	ids = append(ids, tok.Encode("\n")...)
+	ids = append(ids, imStart)
+	ids = append(ids, tok.Encode("assistant\n")...)
+
+	// Qwen3 is a hybrid thinking model: left to itself, it opens every reply
+	// with a <think>...</think> reasoning block, which chatMaxTokens' 48-token
+	// budget (kept small so a reply doesn't feel hung at ~484ms/token) is
+	// nowhere near enough to think through and still answer. Pre-seeding an
+	// already-closed think block is Qwen3's own documented way of skipping
+	// straight to the answer instead. Skipped if the checkpoint has no think
+	// markers — the tiny demo tokenizer doesn't.
+	if thinkOpen, ok := tok.TokenID("<think>"); ok {
+		if thinkClose, ok := tok.TokenID("</think>"); ok {
+			ids = append(ids, thinkOpen)
+			ids = append(ids, tok.Encode("\n\n")...)
+			ids = append(ids, thinkClose)
+			ids = append(ids, tok.Encode("\n\n")...)
+		}
+	}
+	return ids
 }
 
 // emit hands one message to the chat screen, or gives up if the screen has gone

@@ -170,6 +170,16 @@ func (t *Tokenizer) DecodeSkipSpecial(ids []int) string { return t.decode(ids, t
 // IsSpecial reports whether an id came from the added_tokens block.
 func (t *Tokenizer) IsSpecial(id int) bool { return t.special[id] }
 
+// TokenID looks up a token by its exact string, e.g. a chat-template marker
+// like "<|im_start|>". Returns false if the tokenizer doesn't know it — not
+// every tokenizer.json ships chat markers, and Encode can't produce these:
+// it only ever emits ids by running BPE over raw text, never by matching a
+// literal special token inside it.
+func (t *Tokenizer) TokenID(token string) (int, bool) {
+	id, ok := t.vocab[token]
+	return id, ok
+}
+
 // decode walks the ids accumulating byte-level runes, translating them back to
 // raw bytes in runs. Runs matter: a single UTF-8 character is often split
 // across several tokens, so bytes can only be turned into a string in batches,
