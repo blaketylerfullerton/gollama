@@ -25,8 +25,9 @@ type DownloadOutcome int
 
 const (
 	// downloadRunning is the zero value, meaning it's still going — Outcome
-	// only means anything once done has fired.
-	downloadRunning DownloadOutcome = iota
+	// only means anything once done has fired. Never referenced by name; it
+	// exists to document the zero value, not to be assigned.
+	downloadRunning DownloadOutcome = iota //nolint:unused
 	// DownloadDone means the checkpoint is on disk; go run it.
 	DownloadDone
 	// DownloadFailed means the fetch errored out; Err has why.

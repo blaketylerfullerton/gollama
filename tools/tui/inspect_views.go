@@ -81,10 +81,10 @@ func (a *Inspect) lensView() string {
 			label, truncate(fmt.Sprintf("%q", top.Text), 14), top.Prob*100,
 			rank, ent, bar(top.Prob, 24))
 
-		switch {
-		case e.Layer == a.layer:
+		switch e.Layer {
+		case a.layer:
 			b.WriteString(selectedStyle.Render(row))
-		case e.Layer == firstWin:
+		case firstWin:
 			b.WriteString(headingStyle.Render(row))
 		default:
 			b.WriteString(row)
@@ -156,10 +156,10 @@ func (a *Inspect) attentionBarsView(e trace.Event, q int, label func(int) string
 	row := e.Weights[q][:q+1]
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  layer %s  head %s   query %s  %s\n\n",
+	fmt.Fprintf(&b, "  layer %s  head %s   query %s  %s\n\n",
 		keyStyle.Render(fmt.Sprint(a.layer)), keyStyle.Render(fmt.Sprint(a.head)),
 		headingStyle.Render(truncate(fmt.Sprintf("%q", label(q)), 14)),
-		dimStyle.Render(fmt.Sprintf("(token %d of %d)", q, len(e.Weights)-1))))
+		dimStyle.Render(fmt.Sprintf("(token %d of %d)", q, len(e.Weights)-1)))
 
 	// Anchored on the query token itself (the last entry) rather than 0, so a
 	// long prefix scrolls to show what's nearest it first.
@@ -170,7 +170,7 @@ func (a *Inspect) attentionBarsView(e trace.Event, q int, label func(int) string
 		if w > topW {
 			top, topW = i, w
 		}
-		b.WriteString(fmt.Sprintf("  %-12s %s %5.1f%%\n", label(i), bar(float64(w), 24), w*100))
+		fmt.Fprintf(&b, "  %-12s %s %5.1f%%\n", label(i), bar(float64(w), 24), w*100)
 	}
 
 	b.WriteString("\n" + dimStyle.Render(fmt.Sprintf(
@@ -193,9 +193,9 @@ func (a *Inspect) attentionBarsView(e trace.Event, q int, label func(int) string
 // deepens.
 func (a *Inspect) attentionTraceView(s *inspectStep, q int, label func(int) string) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  tracing %s   head %s\n\n",
+	fmt.Fprintf(&b, "  tracing %s   head %s\n\n",
 		headingStyle.Render(truncate(fmt.Sprintf("%q", label(q)), 14)),
-		keyStyle.Render(fmt.Sprint(a.head))))
+		keyStyle.Render(fmt.Sprint(a.head)))
 	b.WriteString(headerRowStyle.Render(
 		fmt.Sprintf("  %-5s %-14s %6s  %s", "layer", "attends to", "wt", "")) + "\n")
 
@@ -223,10 +223,10 @@ func (a *Inspect) attentionTraceView(s *inspectStep, q int, label func(int) stri
 		}
 		row := fmt.Sprintf("  %-5d %-14s %5.1f%%  %s", l, truncate(text, 14), w*100, bar(float64(w), 16))
 
-		switch {
-		case l == a.layer:
+		switch l {
+		case a.layer:
 			b.WriteString(selectedStyle.Render(row))
-		case l == firstStable:
+		case firstStable:
 			b.WriteString(headingStyle.Render(row))
 		default:
 			b.WriteString(row)
@@ -283,9 +283,9 @@ func (a *Inspect) attributionView() string {
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  layer %s   pushing %s\n\n",
+	fmt.Fprintf(&b, "  layer %s   pushing %s\n\n",
 		keyStyle.Render(fmt.Sprint(a.layer)),
-		headingStyle.Render(truncate(fmt.Sprintf("%q", label), 16))))
+		headingStyle.Render(truncate(fmt.Sprintf("%q", label), 16)))
 
 	// Bars are scaled within the layer, so a layer that barely moves anything
 	// doesn't render as flat — the shape across its components is still the
@@ -418,8 +418,8 @@ func (a *Inspect) ablationView() string {
 	abl := a.ablateSteps[a.cur]
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  ablating layer %s head %s\n\n",
-		keyStyle.Render(fmt.Sprint(a.layer)), keyStyle.Render(fmt.Sprint(a.head))))
+	fmt.Fprintf(&b, "  ablating layer %s head %s\n\n",
+		keyStyle.Render(fmt.Sprint(a.layer)), keyStyle.Render(fmt.Sprint(a.head)))
 	b.WriteString(headerRowStyle.Render(fmt.Sprintf("  %-5s %-14s %7s   %-14s %7s   %s",
 		"layer", "baseline", "prob", "ablated", "prob", "Δ baseline's pick")) + "\n")
 
@@ -458,10 +458,10 @@ func (a *Inspect) ablationView() string {
 			truncate(fmt.Sprintf("%q", at.Text), 14), at.Prob*100,
 			signedBar(delta, 1, 10))
 
-		switch {
-		case be.Layer == a.layer:
+		switch be.Layer {
+		case a.layer:
 			b.WriteString(selectedStyle.Render(row))
-		case be.Layer == firstDiverge:
+		case firstDiverge:
 			b.WriteString(headingStyle.Render(row))
 		default:
 			b.WriteString(row)

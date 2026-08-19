@@ -184,7 +184,7 @@ func TestPreviewIsClipped(t *testing.T) {
 		row[i] = float32(i)
 	}
 	w.Stage(0, "wide", [][]float32{row})
-	w.Close()
+	_ = w.Close()
 
 	tr, err := Read(bytes.NewReader(buf.Bytes()))
 	if err != nil {
@@ -213,7 +213,7 @@ func TestAttentionSkippedForLongSequences(t *testing.T) {
 	}
 	w.Attention(0, 0, short)
 	w.Attention(1, 0, long)
-	w.Close()
+	_ = w.Close()
 
 	tr, _ := Read(bytes.NewReader(buf.Bytes()))
 	if got := len(tr.Kind(KindAttention)); got != 1 {
@@ -227,7 +227,7 @@ func TestStageIgnoresEmptyInput(t *testing.T) {
 	w, _ := NewWriter(&buf, testHeader(), Opts{})
 	w.Stage(0, "empty", nil)
 	w.Stage(0, "empty", [][]float32{})
-	w.Close()
+	_ = w.Close()
 
 	tr, _ := Read(bytes.NewReader(buf.Bytes()))
 	if len(tr.Events) != 0 {
@@ -242,7 +242,7 @@ func TestByLayerSeparatesOutsideStack(t *testing.T) {
 	w.Stage(0, "input norm", [][]float32{{1}})
 	w.Stage(1, "input norm", [][]float32{{1}})
 	w.Stage(-1, "logits", [][]float32{{1}})
-	w.Close()
+	_ = w.Close()
 
 	tr, _ := Read(bytes.NewReader(buf.Bytes()))
 	layers, outside := tr.ByLayer()
@@ -292,7 +292,7 @@ func TestLayerEventMissReturnsFalse(t *testing.T) {
 	var buf bytes.Buffer
 	w, _ := NewWriter(&buf, testHeader(), Opts{})
 	w.Attention(0, 0, [][]float32{{1}})
-	w.Close()
+	_ = w.Close()
 	tr, _ := Read(bytes.NewReader(buf.Bytes()))
 
 	if _, ok := tr.LayerEvent(0, KindAttention, 7); ok {

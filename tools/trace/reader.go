@@ -20,7 +20,7 @@ func Open(path string) (*Trace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening trace: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return Read(f)
 }
 

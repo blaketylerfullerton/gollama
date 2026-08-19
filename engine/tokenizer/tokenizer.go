@@ -228,17 +228,17 @@ func FromPretrained(hfPath string) (*Tokenizer, error) {
 	url := fmt.Sprintf("https://huggingface.co/%s/resolve/main/tokenizer.json", hfPath)
 	resp, err := http.Get(url)
 	if err != nil {
-		return nil, fmt.Errorf("Downloadning tokenizer error for %q: %w", hfPath, err)
+		return nil, fmt.Errorf("downloading tokenizer for %q: %w", hfPath, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Downloading tokenikzer error")
+		return nil, fmt.Errorf("downloading tokenizer for %q: unexpected status %s", hfPath, resp.Status)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading tokenizer response for %q:", err)
+		return nil, fmt.Errorf("reading tokenizer response for %q: %w", hfPath, err)
 	}
 	return loadFromJSON(data)
 }
@@ -248,7 +248,7 @@ func FromDirectory(tokenizerDir string) (*Tokenizer, error) {
 	tokenizerPath := filepath.Join(tokenizerDir, "tokenizer.json")
 	data, error := os.ReadFile(tokenizerPath)
 	if error != nil {
-		return nil, fmt.Errorf("Reading %q: %w", tokenizerPath, error)
+		return nil, fmt.Errorf("reading %q: %w", tokenizerPath, error)
 	}
 	return loadFromJSON(data)
 }

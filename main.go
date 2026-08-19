@@ -268,12 +268,12 @@ func openTrace(path string, s *session, labels []string) (*trace.Writer, func(),
 		Attribution: true,
 	})
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, func() {}, err
 	}
 	return w, func() {
-		w.Close()
-		f.Close()
+		_ = w.Close()
+		_ = f.Close()
 	}, nil
 }
 

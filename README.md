@@ -441,7 +441,7 @@ Memory is `NLayer × NKVHead × HeadDim × 2 × 4` bytes per token. For Qwen3-0.
 go test ./...
 ```
 
-200 tests. `-short` skips the ones that read the 1.5GB checkpoint; all of those also skip cleanly when it's absent, so a fresh clone passes.
+`-short` skips the ones that read the 1.5GB checkpoint; all of those also skip cleanly when it's absent, so a fresh clone passes.
 
 **The one that matters most is `TestRealCheckpointPredictsParis`.** It asserts that the real model, given `"The capital of France is"`, ranks `" Paris"` first with more than 40% probability. That single assertion covers the rotary sign convention, the QK-norm ordering, the GQA head mapping, and every weight transpose at once — because all of those failure modes produce a flat distribution over nonsense rather than an error. It's the difference between "the code runs" and "the math is right."
 
@@ -587,5 +587,8 @@ tools/
   watermark/         SynthID-Text-style tournament sampling and its detector —
                      see Watermarking above
 
-.github/workflows/   CI: build, vet, gofmt -l, and go test ./... on every push to main
+.github/workflows/   CI: build, vet, gofmt -l, golangci-lint, and go test ./... on
+                     every push to main
+.golangci.yml        lint config for CI's golangci-lint step — the standard
+                     linter set, nothing project-specific yet
 ```

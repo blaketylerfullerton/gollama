@@ -193,7 +193,7 @@ func headSize(ctx context.Context, client *http.Client, repo, name string) (int6
 	if err != nil {
 		return -1, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK || resp.ContentLength < 0 {
 		return -1, fmt.Errorf("no size for %s", name)
 	}
@@ -213,7 +213,7 @@ func getBytes(ctx context.Context, client *http.Client, repo, name string) ([]by
 	if err != nil {
 		return nil, 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return nil, resp.StatusCode, nil
 	}
@@ -245,7 +245,7 @@ func fetchFile(ctx context.Context, client *http.Client, repo, name, dir string,
 	if err != nil {
 		return 0, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode == http.StatusNotFound {
 		return 0, errNotFound
 	}
@@ -263,10 +263,10 @@ func fetchFile(ctx context.Context, client *http.Client, repo, name, dir string,
 	closeErr := f.Close()
 	switch {
 	case copyErr != nil:
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return n, copyErr
 	case closeErr != nil:
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return n, closeErr
 	}
 	if err := os.Rename(tmp, dest); err != nil {

@@ -41,8 +41,12 @@ func TestSaveOverwrites(t *testing.T) {
 	SetTestDir(t, t.TempDir())
 
 	id := NewID(time.Now())
-	Save(Conversation{ID: id, Turns: []Entry{{You: "one"}}})
-	Save(Conversation{ID: id, Turns: []Entry{{You: "one"}, {You: "two"}}})
+	if err := Save(Conversation{ID: id, Turns: []Entry{{You: "one"}}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := Save(Conversation{ID: id, Turns: []Entry{{You: "one"}, {You: "two"}}}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 
 	got, err := List()
 	if err != nil {

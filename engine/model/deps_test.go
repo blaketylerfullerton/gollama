@@ -15,7 +15,11 @@ const modulePath = "github.com/blaketylerfullerton/GoLlama"
 func imports(t *testing.T, dir string) map[string][]string {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool {
+	// ParseDir is deprecated in favor of golang.org/x/tools/go/packages, whose
+	// build-tag awareness this test has no use for — pulling in that module
+	// would itself be the kind of dependency TestEngineHasNoThirdPartyDependencies
+	// exists to catch.
+	pkgs, err := parser.ParseDir(fset, dir, func(fi fs.FileInfo) bool { //nolint:staticcheck
 		return !strings.HasSuffix(fi.Name(), "_test.go")
 	}, parser.ImportsOnly)
 	if err != nil {
