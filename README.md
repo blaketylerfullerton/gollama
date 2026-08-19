@@ -1,3 +1,7 @@
+
+
+https://github.com/user-attachments/assets/874e8a58-1525-4af7-8da0-82ff2487ee20
+
 <div align="center">
 <img src="https://i.postimg.cc/kg3gqwB1/Gemini-Generated-Image-bws52zbws52zbws5.png" alt="Go Llama" style="max-width: 600px; width: 100%;">
 </div>
@@ -458,6 +462,12 @@ transformer works, `engine/` is the whole thing and you can ignore the rest.
 ## Attention
 
 https://github.com/user-attachments/assets/2ac27680-323b-4a28-b33e-d2548cd63f3b
+
+## Ablation
+
+
+
+https://github.com/user-attachments/assets/b39f6586-f8fb-46f0-8a81-ca73697455c0
 
 
 
