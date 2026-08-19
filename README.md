@@ -2,6 +2,10 @@
 
 <div align="center">
 <img src="https://i.postimg.cc/kg3gqwB1/Gemini-Generated-Image-bws52zbws52zbws5.png" alt="Go Llama" style="max-width: 600px; width: 100%;">
+
+[![CI](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml/badge.svg)](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml)
+[![Go version](https://img.shields.io/github/go-mod/go-version/blaketylerfullerton/gollama)](go.mod)
+[![License: MIT](https://img.shields.io/github/license/blaketylerfullerton/gollama)](LICENSE)
 </div>
 
 This repo started as a rewrite by (mostly) hand of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), but in Go. It has since moved to the **Qwen3** architecture, and it now runs real pretrained Qwen3-0.6B weights:
@@ -16,6 +20,23 @@ This is purely to help me understand inference and transformers better.
 Not optimal at all, just for learning. Meant to be a hackable, super simple project for understanding how LLM inference works from first principles.
 
 Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tools/tui`). Nothing under `engine/` imports either.
+
+## Contents
+
+- [Running it](#running-it)
+- [The walkthrough](#the-walkthrough)
+- [Inspecting a run](#inspecting-a-run)
+- [How the printing works](#how-the-printing-works)
+- [Architecture](#architecture)
+- [Loading real weights](#loading-real-weights)
+- [The tokenizer](#the-tokenizer)
+- [Generating text](#generating-text)
+- [Watermarking](#watermarking)
+- [The KV cache](#the-kv-cache)
+- [Tests](#tests)
+- [Speed](#speed)
+- [Not implemented yet](#not-implemented-yet)
+- [Layout](#layout)
 
 ## Running it
 
