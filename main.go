@@ -51,6 +51,7 @@ func main() {
 	noSplash := flag.Bool("no-splash", false, "skip the welcome screen and run straight away")
 	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay, and show live commit-layer depth in the chat footer; the inspect tools always trace, this only affects Chat (forces attention heads to run sequentially, which costs real throughput)")
 	replayFile := flag.String("f", "", "replay a trace file in the inspect screen instead of running a model — needs no checkpoint")
+	watermarkDemo := flag.Bool("watermark", false, "run a SynthID-Text-style watermarking demo: generate the prompt watermarked and plain with the same checkpoint, then run the detector on both")
 	flag.Parse()
 
 	// -f needs no checkpoint and none of the other screens: it opens straight
@@ -59,6 +60,16 @@ func main() {
 	// into this binary.
 	if *replayFile != "" {
 		if err := tui.StartInspectFile(*replayFile); err != nil {
+			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// -watermark is its own printed walkthrough, same as -no-splash below,
+	// just comparing two generations instead of narrating one.
+	if *watermarkDemo {
+		if err := runWatermarkDemo(*prompt); err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}
@@ -79,7 +90,7 @@ func main() {
 	// package tui deliberately knows nothing about one.
 	interactive := !*noSplash && isTerminal(os.Stdout)
 	if interactive {
-		if err := tui.Start(checkpointDir, *prompt, newChatEngine(*traceChat), newInspectEngine()); err != nil {
+		if err := tui.Start(checkpointDir, *prompt, newChatEngine(*traceChat), newInspectEngine(), newWatermarkEngine()); err != nil {
 			fmt.Fprintf(os.Stderr, "gollama: %v\n", err)
 			os.Exit(1)
 		}

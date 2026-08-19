@@ -143,7 +143,7 @@ func TestWelcomeOpensOnAttention(t *testing.T) {
 // Tool() is what tells them apart, not Choice(). Machine is highlightable
 // but leads nowhere: it exists for its detail panel, not to be run.
 func TestWelcomeRowsPickATool(t *testing.T) {
-	want := []Tool{ToolAttention, ToolLens, ToolAttribution, ToolAblation, ToolChat, ToolModel}
+	want := []Tool{ToolAttention, ToolLens, ToolAttribution, ToolAblation, ToolWatermark, ToolChat, ToolModel}
 	if len(want)+1 != len(menuItems) {
 		t.Fatalf("test covers %d runnable rows + Machine, menu has %d rows", len(want), len(menuItems))
 	}

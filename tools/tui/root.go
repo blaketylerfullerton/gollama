@@ -33,18 +33,20 @@ type Root struct {
 	checkpointDir string
 	root          string // where the catalog looks for checkpoints
 	prompt        string // the -prompt flag, prefilled into the chat input
-	sys           sysinfo.Info
-	engine        Engine
-	inspectEngine InspectEngine
+	sys             sysinfo.Info
+	engine          Engine
+	inspectEngine   InspectEngine
+	watermarkEngine Engine // same shape as engine — a prompt in, tea.Msg out — just a different screen's messages
 
-	at       screenID
-	welcome  *Welcome
-	picker   *Picker
-	about    *About
-	history  *History
-	download *Download
-	chat     *Chat
-	inspect  *Inspect
+	at        screenID
+	welcome   *Welcome
+	picker    *Picker
+	about     *About
+	history   *History
+	download  *Download
+	chat      *Chat
+	inspect   *Inspect
+	watermark *Watermark
 
 	// chatStop ends the engine goroutine behind the chat screen. Held here
 	// rather than on the Chat, because it has to outlive the screen by exactly
@@ -52,6 +54,8 @@ type Root struct {
 	chatStop context.CancelFunc
 	// inspectStop is chatStop's counterpart for the inspect screen.
 	inspectStop context.CancelFunc
+	// watermarkStop is chatStop's counterpart for the watermark screen.
+	watermarkStop context.CancelFunc
 
 	// pendingTool is which tool the welcome menu picked, read once the picker
 	// resolves — the same Picker screen now serves both Chat and Inspect, so
@@ -84,6 +88,7 @@ const (
 	atDownload
 	atChat
 	atInspect
+	atWatermark
 )
 
 // doneMsg is how a child says it has finished with itself. It replaces the
@@ -99,24 +104,26 @@ func done() tea.Msg { return doneMsg{} }
 // detected once here and handed to every screen that needs it: detection shells
 // out to sysctl and vm_stat, and repeating that per screen was a visible pause
 // for numbers that cannot have changed.
-func NewRoot(checkpointDir, prompt string, engine Engine, inspectEngine InspectEngine) *Root {
+func NewRoot(checkpointDir, prompt string, engine Engine, inspectEngine InspectEngine, watermarkEngine Engine) *Root {
 	sys := sysinfo.Detect()
 	return &Root{
-		checkpointDir: checkpointDir,
-		root:          filepath.Dir(checkpointDir),
-		prompt:        prompt,
-		sys:           sys,
-		engine:        engine,
-		inspectEngine: inspectEngine,
-		at:            atWelcome,
-		welcome:       NewWelcomeFor(sys, checkpointDir),
+		checkpointDir:   checkpointDir,
+		root:            filepath.Dir(checkpointDir),
+		prompt:          prompt,
+		sys:             sys,
+		engine:          engine,
+		inspectEngine:   inspectEngine,
+		watermarkEngine: watermarkEngine,
+		at:              atWelcome,
+		welcome:         NewWelcomeFor(sys, checkpointDir),
 	}
 }
 
 // Start puts the whole program on one alternate screen and returns when the user
 // leaves it.
-func Start(checkpointDir, prompt string, engine Engine, inspectEngine InspectEngine) error {
-	_, err := tea.NewProgram(NewRoot(checkpointDir, prompt, engine, inspectEngine), tea.WithAltScreen()).Run()
+func Start(checkpointDir, prompt string, engine Engine, inspectEngine InspectEngine, watermarkEngine Engine) error {
+	_, err := tea.NewProgram(NewRoot(checkpointDir, prompt, engine, inspectEngine, watermarkEngine),
+		tea.WithAltScreen()).Run()
 	return err
 }
 
@@ -180,6 +187,10 @@ func (r *Root) current() tea.Model {
 		if r.inspect != nil {
 			return r.inspect
 		}
+	case atWatermark:
+		if r.watermark != nil {
+			return r.watermark
+		}
 	}
 	if r.welcome != nil {
 		return r.welcome
@@ -228,6 +239,8 @@ func (r *Root) advance() tea.Cmd {
 			switch r.pendingTool {
 			case ToolChat:
 				return r.openChat(m)
+			case ToolWatermark:
+				return r.openWatermark(m)
 			case ToolModel:
 				// The welcome menu's Model row opens the picker on its own,
 				// with no analysis tool waiting behind it — once a model is
@@ -253,6 +266,8 @@ func (r *Root) advance() tea.Cmd {
 			switch r.pendingTool {
 			case ToolChat:
 				return r.openChat(found)
+			case ToolWatermark:
+				return r.openWatermark(found)
 			case ToolModel:
 				return r.show(atWelcome)
 			}
@@ -295,6 +310,13 @@ func (r *Root) advance() tea.Cmd {
 		// r.picker is nil under StartInspectFile's Root: there's no picker,
 		// or anything else, behind a replayed trace file to go back to.
 		if back && r.picker != nil {
+			return r.show(atPicker)
+		}
+
+	case atWatermark:
+		back := r.watermark.Outcome() == WatermarkBack
+		r.closeWatermark()
+		if back {
 			return r.show(atPicker)
 		}
 	}
@@ -402,6 +424,30 @@ func (r *Root) closeChat() {
 		r.chatStop = nil
 	}
 	r.chat = nil
+}
+
+// openWatermark starts an engine for m and shows the comparison screen —
+// openChat's counterpart, same reasoning about loading in the background.
+func (r *Root) openWatermark(m Model) tea.Cmd {
+	ctx, stop := context.WithCancel(context.Background())
+	events := make(chan tea.Msg)
+	reqs := make(chan string, 1)
+	go r.watermarkEngine(ctx, m.Dir, reqs, events)
+
+	r.watermarkStop = stop
+	r.watermark = NewWatermark(events, reqs, r.prompt)
+	r.at = atWatermark
+	return tea.Batch(r.watermark.Init(), r.sizeCurrent())
+}
+
+// closeWatermark ends the engine behind the watermark screen — closeChat's
+// counterpart, same reasoning.
+func (r *Root) closeWatermark() {
+	if r.watermarkStop != nil {
+		r.watermarkStop()
+		r.watermarkStop = nil
+	}
+	r.watermark = nil
 }
 
 // openInspect starts an inspect engine for m and shows it, defaulted to

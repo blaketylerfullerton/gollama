@@ -56,6 +56,13 @@ const (
 	ToolAttention
 	ToolAttribution
 	ToolLens
+	// ToolWatermark runs the prompt twice — plain, and through a
+	// SynthID-Text-style tournament sampler — and shows what a detector
+	// reads off each. Not another lens onto this model's internals like the
+	// four above it; it's a demo of a technique applied on top of sampling,
+	// which is why it opens its own screen (see root.go's openWatermark)
+	// rather than another Inspect view.
+	ToolWatermark
 	// ToolChat talks to the model turn by turn, same as every other tool a
 	// peer of in this list rather than the separate program it used to be.
 	ToolChat
@@ -89,6 +96,7 @@ var toolItems = []menuItem{
 	{title: "Logit Lens", tool: ToolLens, run: true, detail: (*Welcome).lensBlurb},
 	{title: "Attribution", tool: ToolAttribution, run: true, detail: (*Welcome).attributionBlurb},
 	{title: "Ablation", tool: ToolAblation, run: true, detail: (*Welcome).ablationBlurb},
+	{title: "Watermark", tool: ToolWatermark, run: true, detail: (*Welcome).watermarkBlurb},
 }
 
 // otherItems is everything on the menu that isn't a trace tool: talk to the
@@ -387,6 +395,20 @@ func (w *Welcome) ablationBlurb() string {
 	}, "\n")
 }
 
+// watermarkBlurb is the detail panel for the menu's fifth row.
+func (w *Welcome) watermarkBlurb() string {
+	return strings.Join([]string{
+		heading("Watermark"),
+		"",
+		dimStyle.Render("Generate the same prompt plain and through a SynthID-Text-style"),
+		dimStyle.Render("tournament sampler, then run a detector over both — the detector"),
+		dimStyle.Render("reads a statistical signature out of text, no metadata involved."),
+		"",
+		dimStyle.Render("example — the detector's read on each:"),
+		watermarkExample(),
+	}, "\n")
+}
+
 // attentionBlurb is the detail panel for the menu's second row.
 func (w *Welcome) attentionBlurb() string {
 	return strings.Join([]string{
@@ -612,6 +634,18 @@ func ablationExample() string {
 		fmt.Sprintf("  %-9s %-14s %s", "baseline", `"Paris" 91%`, bar(0.91, 16)),
 		fmt.Sprintf("  %-9s %-14s %s", "ablated", `"France" 38%`, bar(0.38, 16)),
 		dimStyle.Render("  top prediction flips — this head was load-bearing here"),
+	}, "\n")
+}
+
+// watermarkExample previews watermarkView's detector readout — same shape as
+// ablationExample's baseline-vs-ablated comparison, since this is the same
+// kind of two-run comparison, just over the detector's z-score instead of a
+// top prediction.
+func watermarkExample() string {
+	return strings.Join([]string{
+		fmt.Sprintf("  %-11s %-16s %s", "plain", "z  -0.5", bar(0.05, 16)),
+		fmt.Sprintf("  %-11s %-16s %s", "watermarked", "z  4.9", bar(0.6, 16)),
+		dimStyle.Render("  z above ~4 reads as watermarked — ordinary text has no reason to get there"),
 	}, "\n")
 }
 
