@@ -455,6 +455,12 @@ outside the standard library. `tools/` is everything that makes a run watchable
 — and is where every third-party import lives. If you came here to read how a
 transformer works, `engine/` is the whole thing and you can ignore the rest.
 
+## Attention
+
+https://github.com/user-attachments/assets/2ac27680-323b-4a28-b33e-d2548cd63f3b
+
+
+
 ```text
 main.go              flag parsing, the printed walkthrough (-no-splash / piped),
                      and setup() — loads a checkpoint, or falls back to a
