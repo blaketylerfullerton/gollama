@@ -10,3 +10,5 @@ checkpoints/
 
 # Trace files produced by `go run . -trace ...`
 *.jsonl
+
+python/
