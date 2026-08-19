@@ -1,7 +1,5 @@
 
 
-https://github.com/user-attachments/assets/874e8a58-1525-4af7-8da0-82ff2487ee20
-
 <div align="center">
 <img src="https://i.postimg.cc/kg3gqwB1/Gemini-Generated-Image-bws52zbws52zbws5.png" alt="Go Llama" style="max-width: 600px; width: 100%;">
 </div>
