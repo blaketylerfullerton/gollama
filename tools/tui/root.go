@@ -30,9 +30,9 @@ import (
 // change asked of each one is that it returns done instead of tea.Quit: under
 // one program a screen returning tea.Quit would take the application with it.
 type Root struct {
-	checkpointDir string
-	root          string // where the catalog looks for checkpoints
-	prompt        string // the -prompt flag, prefilled into the chat input
+	checkpointDir   string
+	root            string // where the catalog looks for checkpoints
+	prompt          string // the -prompt flag, prefilled into the chat input
 	sys             sysinfo.Info
 	engine          Engine
 	inspectEngine   InspectEngine

@@ -379,6 +379,45 @@ Stop tokens end the run and aren't included in the result. Both `opts.Stop` and 
 
 The prompt goes through in one **prefill** pass, then each new token is fed in on its own while the KV cache carries the history forward.
 
+## Watermarking
+
+```bash
+go run . -watermark -prompt "The capital of France is"
+```
+
+`tools/watermark/` implements a SynthID-Text-style watermark: a second, independent way to draw tokens from the same model that steers generation toward tokens a secret function scores highly, plus a detector that recovers that bias from text alone — no model access required, no change to what the model itself computes.
+
+Ordinary sampling draws one token from the distribution. Tournament sampling draws `2^Layers` i.i.d. candidates instead, then runs a single-elimination bracket: round `l` compares two candidates by `gValue(seed, l, token)`, a pseudorandom score in `[0,1)` seeded from a secret `Key` and the last `ContextSize` tokens, and the higher score wins. The survivor is still a legitimate draw from the model's own distribution — nothing is truncated or reweighted — but it's biased toward high-`g` tokens, and that bias is exactly what `Detect` looks for: recompute each emitted token's `g`-value against the same `Key`, average over every scored position and tournament layer, and compare to the 0.5 an unwatermarked text would sit at. The gap becomes a z-score, since under the null each `g`-value behaves as an independent `Uniform[0,1)` draw.
+
+```text
+prompt  "The capital of France is"
+SynthID-Text demo — key 0xc0ffeed15c05eed, 4-token context, 4 tournament layers (16-way)
+
+─── plain (ordinary sampling) ───────────────────────────────────────────
+ Paris and is home to the Seine River, which is the primary river used for the transportation of goods and commerce. The city's famous landmarks are the Eiffel Tower, Louvre Museum, Eiffel Tower, and the Louvre Museum are all located in Paris. In addition to these landmarks, there are also several other attractions and cultural centers in Paris that contribute to its development. The
+
+─── watermarked (tournament sampling) ───────────────────────────────────
+ Paris, and it's approximately 200,000 km². If the population of Paris was 38,000 and the average number of inhabitants per km² is 18, what is the total number of people from all cities in the region?
+
+To answer the problem, you can use the formula:
+
+Total number of people = (Population of Paris + Population
+
+─── detector ────────────────────────────────────────────────────────────
+  plain        mean g 0.492   z  -0.52   (81 scored positions)
+  watermarked  mean g 0.579   z   4.94   (81 scored positions)
+
+  z above ~4 is the usual line for "almost certainly watermarked" — ordinary text has no reason to land there.
+```
+
+Both texts read as ordinary model output — nothing about the watermarked one looks different — but only one of them carries a statistical signature the detector can pick out without ever seeing how it was generated.
+
+The signal depends on the model actually being uncertain at each step: greedy or low-temperature decoding leaves the tournament nothing to bias, since there's no entropy in the draw for the bracket to skew. That's why the demo runs at `Temperature: 1.0` rather than the lower values the rest of the README uses — a real property of tournament sampling, not an artifact of the demo.
+
+There's no `TopK`/`TopP` in `watermark.GenerateOpts` — either would truncate the candidate pool before the watermark gets a say, which is exactly the distortion tournament sampling exists to avoid.
+
+The same comparison is a screen on the welcome menu (`Watermark`, alongside Ablation/Attention/Attribution/Logit Lens): type a prompt, and it runs both generations against the loaded checkpoint and shows the detector's readout for each side by side.
+
 ## The KV cache
 
 ```go
@@ -481,6 +520,9 @@ inspect_engine.go    the same wiring for the inspect screen: loads a
                      checkpoint, runs traced prefill/decode passes (optionally
                      with a head ablated), and answers the live tokenization
                      preview — used to be its own binary, cmd/inspect
+watermark_demo.go    the -watermark flag's printed comparison: plain vs.
+                     tournament-sampled generation, scored by tools/watermark
+watermark_engine.go  the same comparison wired into the Watermark screen
 
 engine/
   tokenizer/         byte-level BPE, hand-written pretokenizer, tokenizer.json
@@ -512,7 +554,7 @@ tools/
                      than only ever ended
     welcome.go       screen 1: this machine and what's on disk to run on it,
                      and the tool menu — Ablation, Attention, Attribution,
-                     Logit Lens, Chat
+                     Logit Lens, Watermark, Chat
     picker.go        screen 2: every known model, memory cost against this
                      machine, and a fits/recommended/too-large verdict —
                      shared by every tool picked on the welcome menu
@@ -542,6 +584,8 @@ tools/
   history/           persists chat transcripts as JSON, one file per
                      conversation, under ~/.gollama/history
   sysinfo/           what hardware this is about to run on
+  watermark/         SynthID-Text-style tournament sampling and its detector —
+                     see Watermarking above
 
-.github/workflows/   CI: go build ./... and go test ./... on every push to main
+.github/workflows/   CI: build, vet, gofmt -l, and go test ./... on every push to main
 ```
