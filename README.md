@@ -238,12 +238,3 @@ Two top-level folders. `engine/` is the inference itself and depends on nothing 
 
 The full annotated file tree — every file in `main.go`/`engine/`/`tools/`, what it does, and why it's split that way — is in **[docs/layout.md](docs/layout.md)**.
 
-## Demos
-
-**Ablation**
-
-https://github.com/user-attachments/assets/b39f6586-f8fb-46f0-8a81-ca73697455c0
-
-**Attention**
-
-https://github.com/user-attachments/assets/2ac27680-323b-4a28-b33e-d2548cd63f3b
