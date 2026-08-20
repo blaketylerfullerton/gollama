@@ -1,7 +1,7 @@
 
 
 <div align="center">
-<img src="https://i.postimg.cc/kg3gqwB1/Gemini-Generated-Image-bws52zbws52zbws5.png" alt="Go Llama" style="max-width: 600px; width: 100%;">
+<img src="https://i.postimg.cc/kg3gqwB1/Gemini-Generated-Image-bws52zbws52zbws5.png" alt="Go Llama" style="max-width: 400px; width: 100%;">
 
 [![CI](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml/badge.svg)](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/blaketylerfullerton/gollama)](go.mod)
