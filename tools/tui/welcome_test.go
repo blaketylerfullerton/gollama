@@ -120,12 +120,12 @@ func TestWelcomeEscDoesNotQuit(t *testing.T) {
 	}
 }
 
-// The menu opens on Attention — the top of the trace-tool section — and
-// pressing enter without touching an arrow key should lead straight to it.
-func TestWelcomeOpensOnAttention(t *testing.T) {
+// The menu opens on Chat — the top row — and pressing enter without
+// touching an arrow key should lead straight to it.
+func TestWelcomeOpensOnChat(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	if w.cursor != 0 {
-		t.Errorf("cursor = %d, want 0 (Attention)", w.cursor)
+		t.Errorf("cursor = %d, want 0 (Chat)", w.cursor)
 	}
 	_, cmd := w.Update(key("enter"))
 	if cmd == nil {
@@ -134,8 +134,8 @@ func TestWelcomeOpensOnAttention(t *testing.T) {
 	if w.Choice() != Run {
 		t.Errorf("Choice() = %v, want Run", w.Choice())
 	}
-	if w.Tool() != ToolAttention {
-		t.Errorf("Tool() = %v, want ToolAttention", w.Tool())
+	if w.Tool() != ToolChat {
+		t.Errorf("Tool() = %v, want ToolChat", w.Tool())
 	}
 }
 
@@ -143,7 +143,7 @@ func TestWelcomeOpensOnAttention(t *testing.T) {
 // Tool() is what tells them apart, not Choice(). Machine is highlightable
 // but leads nowhere: it exists for its detail panel, not to be run.
 func TestWelcomeRowsPickATool(t *testing.T) {
-	want := []Tool{ToolAttention, ToolLens, ToolAttribution, ToolAblation, ToolWatermark, ToolChat, ToolModel}
+	want := []Tool{ToolChat, ToolAttention, ToolLens, ToolAttribution, ToolAblation, ToolWatermark, ToolModel}
 	if len(want)+1 != len(menuItems) {
 		t.Fatalf("test covers %d runnable rows + Machine, menu has %d rows", len(want), len(menuItems))
 	}
@@ -241,16 +241,22 @@ func TestWelcomeShowsBothMenuRows(t *testing.T) {
 	w := NewWelcome(t.TempDir())
 	w.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	view := w.View()
-	for _, want := range []string{"Ablation", "Attention", "Other", "Model", "Machine"} {
+	for _, want := range []string{"Chat", "Ablation", "Attention", "Other", "Model", "Machine"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("view is missing %q", want)
 		}
 	}
-	// "magnitude" rather than a longer phrase from the blurb: word-wrap in
+	// "turn by turn" rather than a longer phrase from the blurb: word-wrap in
 	// the panel can legitimately split a phrase across lines at some widths,
 	// and this test cares that the teaser rendered, not exactly how it wrapped.
+	if !strings.Contains(view, "turn by turn") {
+		t.Error("Chat's teaser is not showing by default")
+	}
+
+	w.Update(key("j"))
+	view = w.View()
 	if !strings.Contains(view, "magnitude") {
-		t.Error("Attention's teaser is not showing by default")
+		t.Error("highlighting \"Attention\" did not show its teaser")
 	}
 
 	w.Update(key("j"))

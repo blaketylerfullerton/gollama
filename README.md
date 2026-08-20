@@ -42,53 +42,7 @@ Inference only — no training. **The engine has no dependencies**; only the ter
 go run .
 ```
 
-You get a welcome screen first — the llama on the left, the machine you're about to run on down the right:
-
-```text
-                     ▄▄  ▄▄       ╭───────────────────────────────────────────────────────╮
-                     ██  ██       │  this machine                                         │
-                    ▀███████▄▄    │  host       Blake's MacBook Air                       │
-                    █ o  ████     │  chip       Apple M4                                  │
-                    ▀██▄▄▄███     │  cores      10 cores (4P + 6E)                        │
-                     █████▀       │  gpu        10-core GPU (unused)                      │
-                     █████        │  memory     16.0 GB · 8.4 GB free                     │
-                    █████         │  platform   darwin/arm64                              │
-          ▄▄▄▄▄▄▄▄▄█████          │  runtime    go1.25.0 · GOMAXPROCS 10                  │
-   ▄▄███████████████████          │                                                       │
-    ████████████████████          │  weights                                              │
-    ████████████████████          │  model      qwen3-0.6b                                │
-     ▀██▀▀██▀    ▀██▀▀██▀         │  on disk    1.4 GB                                    │
-      ██  ██      ██  ██          │  resident   2.8 GB  (bf16 → f32)                      │
-      ██  ██      ██  ██          │                                                       │
-      ▀▀  ▀▀      ▀▀  ▀▀          ╰───────────────────────────────────────────────────────╯
-
- ↑↓ choose · enter select · q quit
-```
-
 Hardware detection is in `tools/sysinfo/`: sysctls on macOS, `/proc` on Linux, runtime fields everywhere else. The menu has three entries: "select a model" leads to the picker; "what is GoLlama" leads to a short about page; "past conversations" opens a read-only browser over every chat that's been saved to disk. All three come back here rather than exiting through it.
-
-The picker is where the memory arithmetic that actually matters happens: every model this repo knows about, what it costs on disk versus resident in RAM once bf16 is widened to float32, and a verdict — recommended, fits, or too large — against whatever this machine has free right now:
-
-```text
-  GoLlama  choose a model to start with                     Blake's MacBook Air · 16.0 GB ram · 8.4 GB free
-
- ╭──────────────────────────────────────────────────────────────────────────────────────────────╮
- │  models                                                                                       │
- │                                                                                                │
- │  ▸ Qwen3-0.6B                                              596M    1.4 GB     ready  recommended │
- │    Qwen3-1.7B                                              1.7B    3.8 GB    get it         fits │
- │    Qwen3-4B                                                4.0B    8.2 GB    get it    too large │
- │    Qwen3-8B                                                8.2B   15.3 GB    get it    too large │
- │    tiny random model                                         1M         —  built in         fits │
- ╰──────────────────────────────────────────────────────────────────────────────────────────────╯
- ╭────────────────────────────────────────────────────────────╮ ╭────────────────────────────────╮
- │  Qwen3-0.6B                                                 │ │  MEMORY AFTER LOAD             │
- │  The one this repo is built around...                       │ │  recommendations assume you    │
- │                                                              │ │  keep 4.2 GB free              │
- │  28 layers · 16 q heads over 8 kv heads × 128 dims           │ │                                │
- │  596M parameters · 151936 vocabulary · 40960 max context     │ │  resident         2.8 GB       │
- ╰──────────────────────────────────────────────────────────────╯ ╰────────────────────────────────╯
-```
 
 Pressing enter on an installed model opens the third screen: a chat with it. Every turn is wrapped in Qwen3's ChatML markers (`<|im_start|>`/`<|im_end|>`) with a short default system prompt — that formatting is what turns a base model's next-token prediction into an assistant reply, and `chatTemplate` in `chat.go` builds it via `Tokenizer.TokenID` rather than `Encode`, since `Encode` never maps a literal `<|im_start|>` typed inside text to its id, only bytes. Models whose tokenizer has no chat markers at all (the built-in tiny random model) fall back to the old plain-text behavior. Typing and pressing enter streams tokens back as they're generated; a second tab shows, per generated token, what it attended to and what else the model ranked highly — the same instrumentation the inspect screen (below) uses, read out as two short ranked lists next to a live conversation instead of full matrices. Every turn is saved to disk as it happens, and "past conversations" (`h` on the welcome menu) lets you reopen and replay any of them later without reloading a model.
 
@@ -96,25 +50,6 @@ Pressing enter on one marked "get it" instead fetches it: a progress screen (`to
 
 ```bash
 huggingface-cli download Qwen/Qwen3-0.6B --local-dir checkpoints/qwen3-0.6b
-```
-
-`-prompt` seeds the chat's first message. `-no-splash`, or piping stdout, skips all three screens and falls back to the old fixed walkthrough printed straight to the terminal — for scripting, or a terminal bubbletea can't draw on:
-
-```text
-checkpoints/qwen3-0.6b
-28 layers · 16 q heads / 8 kv heads x 128 dims · 596M params
-
-prompt  "The capital of France is"
-5 tokens  The | _capital | _of | _France | _is
-
-next token
-   65.7%  " Paris"
-    2.8%  " located"
-    2.4%  " the"
-
-output  The capital of France is Paris, and
-
-prefill 2.587s · 3 tokens in 2.831s (944ms/token) · kv cache 224 KB/token
 ```
 
 ## The walkthrough

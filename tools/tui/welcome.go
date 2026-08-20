@@ -89,6 +89,10 @@ type menuItem struct {
 	detail func(w *Welcome) string
 }
 
+// chatItem is the menu's top row, ahead of every trace tool — talking to the
+// model directly is the most common reason to open this screen at all.
+var chatItem = menuItem{title: "Chat", tool: ToolChat, run: true, detail: (*Welcome).chatBlurb}
+
 // toolItems are the trace-viewer tools, top to bottom in the order about.go's
 // third paragraph describes them.
 var toolItems = []menuItem{
@@ -99,19 +103,17 @@ var toolItems = []menuItem{
 	{title: "Watermark", tool: ToolWatermark, run: true, detail: (*Welcome).watermarkBlurb},
 }
 
-// otherItems is everything on the menu that isn't a trace tool: talk to the
-// model directly, manage which checkpoint is on disk, or just read what's
-// under it.
+// otherItems is everything on the menu that isn't chat or a trace tool:
+// manage which checkpoint is on disk, or just read what's under it.
 var otherItems = []menuItem{
-	{title: "Chat", tool: ToolChat, run: true, detail: (*Welcome).chatBlurb},
 	{title: "Model", tool: ToolModel, run: true, detail: (*Welcome).modelBlurb},
 	{title: "Machine", detail: (*Welcome).machineBlurb},
 }
 
-// menuItems is toolItems and otherItems back to back, so one cursor can move
-// through both sections without the rest of the screen caring where the
-// section boundary falls.
-var menuItems = append(append([]menuItem{}, toolItems...), otherItems...)
+// menuItems is chatItem, toolItems, and otherItems back to back, so one
+// cursor can move through all three without the rest of the screen caring
+// where a section boundary falls.
+var menuItems = append(append([]menuItem{chatItem}, toolItems...), otherItems...)
 
 // Checkpoint is what we found on disk where the weights are meant to be. It's
 // scanned rather than loaded: a directory listing costs nothing, and knowing the
@@ -300,13 +302,13 @@ func (w *Welcome) main(width, rows int) string {
 	return lipgloss.JoinVertical(lipgloss.Left, list, "", detail)
 }
 
-// selectorList is the two sections of the welcome menu, one cursor moving
-// through both: "Lenses" — the trace tools — first, then "Other" — chat,
-// the model picker, and the machine this is all running on.
+// selectorList is the welcome menu, one cursor moving through all of it:
+// Chat first, then "Lenses" — the trace tools — then "Other" — the model
+// picker and the machine this is all running on.
 func (w *Welcome) selectorList() string {
-	rows := make([]string, 0, len(toolItems)+len(otherItems)+4)
-	rows = append(rows, heading("Lenses"))
-	idx := 0
+	rows := make([]string, 0, len(toolItems)+len(otherItems)+6)
+	rows = append(rows, w.menuRow(chatItem, 0), "", heading("Lenses"))
+	idx := 1
 	for _, item := range toolItems {
 		rows = append(rows, w.menuRow(item, idx))
 		idx++
@@ -449,7 +451,7 @@ func (w *Welcome) lensBlurb() string {
 	}, "\n")
 }
 
-// chatBlurb is the detail panel for the menu's fifth row.
+// chatBlurb is the detail panel for the menu's top row.
 func (w *Welcome) chatBlurb() string {
 	rows := []string{
 		heading("Chat"),
@@ -468,7 +470,7 @@ func (w *Welcome) chatBlurb() string {
 	return strings.Join(rows, "\n")
 }
 
-// modelBlurb is the detail panel for the Other section's second row: the
+// modelBlurb is the detail panel for the Other section's first row: the
 // picker opened on its own, with no analysis tool waiting behind it.
 func (w *Welcome) modelBlurb() string {
 	rows := []string{
