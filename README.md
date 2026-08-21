@@ -2,13 +2,13 @@
 
 <div align="center">
 <img width="1200" height="700" alt="image" src="https://github.com/user-attachments/assets/371333e4-a96e-4dea-bf6a-1c00df6a395d" />
-
+</div>
 # GoLlama
 	
 [![CI](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml/badge.svg)](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/blaketylerfullerton/gollama)](go.mod)
 [![License: MIT](https://img.shields.io/github/license/blaketylerfullerton/gollama)](LICENSE)
-</div>
+
 
 This repo started as a rewrite by (mostly) hand of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), but in Go. It has since moved to the **Qwen3** architecture, and it now runs real pretrained Qwen3-0.6B weights:
 
