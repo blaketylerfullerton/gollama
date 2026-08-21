@@ -1,28 +1,27 @@
-
-
 <div align="center">
 <img width="1200" height="700" alt="image" src="https://github.com/user-attachments/assets/371333e4-a96e-4dea-bf6a-1c00df6a395d" />
 </div>
 
 # GoLlama
-	
+
 [![CI](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml/badge.svg)](https://github.com/blaketylerfullerton/gollama/actions/workflows/ci.yml)
 [![Go version](https://img.shields.io/github/go-mod/go-version/blaketylerfullerton/gollama)](go.mod)
 [![License: MIT](https://img.shields.io/github/license/blaketylerfullerton/gollama)](LICENSE)
 
-
-This repo started as a rewrite by (mostly) hand of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), but in Go. It has since moved to the **Qwen3** architecture, and it now runs real pretrained Qwen3-0.6B weights:
+GoLlama is a hand-written, hackable Go implementation of transformer inference — started as a rewrite of Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT), now running real pretrained **Qwen3-0.6B** weights:
 
 ```text
 prompt: "The capital of France is"
 output:  Paris, and
 ```
 
-This is purely to help me understand inference and transformers better.
+GoLlama exists to help you:
 
-Not optimal at all, just for learning. Meant to be a hackable, super simple project for understanding how LLM inference works from first principles.
+- Understand how LLM inference actually works, from tokenization to sampling, by reading code with no framework in the way.
+- Run and chat with real pretrained Qwen3 weights, not a toy model.
+- Inspect a forward pass token-by-token — attention, ablation, attribution, and the logit lens.
 
-Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tools/tui`). Nothing under `engine/` imports either.
+Not optimal at all, just for learning. Inference only — no training. **The engine has no dependencies**; only the terminal UI pulls anything in (bubbletea and lipgloss, isolated under `tools/tui`). Nothing under `engine/` imports either.
 
 ## Contents
 
@@ -37,7 +36,7 @@ Inference only — no training. **The engine has no dependencies**; only the ter
 - [Speed](#speed)
 - [Not implemented yet](#not-implemented-yet)
 - [Layout](#layout)
-- [Demos](#demos)
+- [Citation](#citation)
 
 ## Running it
 
@@ -240,4 +239,17 @@ Despite the name, it doesn't run Llama yet — but it's close. Llama needs optio
 Two top-level folders. `engine/` is the inference itself and depends on nothing outside the standard library. `tools/` is everything that makes a run watchable — and is where every third-party import lives. If you came here to read how a transformer works, `engine/` is the whole thing and you can ignore the rest.
 
 The full annotated file tree — every file in `main.go`/`engine/`/`tools/`, what it does, and why it's split that way — is in **[docs/layout.md](docs/layout.md)**.
+
+## Citation
+
+Please cite the repo as follows:
+
+```
+@misc{fullerton2026gollama,
+   title = {GoLlama},
+   author = {Fullerton, Blake},
+   year = {2026},
+   howpublished = {\url{https://github.com/blaketylerfullerton/gollama}},
+}
+```
 
