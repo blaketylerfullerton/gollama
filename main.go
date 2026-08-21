@@ -14,6 +14,10 @@ import (
 	"github.com/blaketylerfullerton/GoLlama/tools/walkthrough"
 )
 
+// version is set via -ldflags "-X main.version=..." by goreleaser; "dev" for
+// a plain `go build`/`go run`.
+var version = "dev"
+
 // isTerminal reports whether f is attached to a terminal. Bubbletea needs one:
 // under `go run . | less` or in CI there is nothing to draw on, so the splash is
 // skipped rather than failing.
@@ -52,7 +56,13 @@ func main() {
 	traceChat := flag.Bool("trace-chat", false, "record what each reply attended to, for the past-conversations replay, and show live commit-layer depth in the chat footer; the inspect tools always trace, this only affects Chat (forces attention heads to run sequentially, which costs real throughput)")
 	replayFile := flag.String("f", "", "replay a trace file in the inspect screen instead of running a model — needs no checkpoint")
 	watermarkDemo := flag.Bool("watermark", false, "run a SynthID-Text-style watermarking demo: generate the prompt watermarked and plain with the same checkpoint, then run the detector on both")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("gollama", version)
+		return
+	}
 
 	// -f needs no checkpoint and none of the other screens: it opens straight
 	// into the inspect screen on a trace already captured (by -trace, on an

@@ -4,6 +4,9 @@ checkpoints/
 # Compiled binary (go build -o GoLlama)
 /GoLlama
 
+# goreleaser output (goreleaser release --snapshot --clean)
+/dist
+
 # Go build/test artifacts
 *.test
 *.out

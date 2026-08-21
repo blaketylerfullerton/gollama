@@ -40,6 +40,26 @@ Not optimal at all, just for learning. Inference only — no training. **The eng
 
 ## Running it
 
+Prebuilt binary (amd64/arm64) — installs `gollama` and launches it:
+
+```bash
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/blaketylerfullerton/gollama/main/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/blaketylerfullerton/gollama/main/install.ps1 | iex
+```
+
+Every later run is just:
+
+```bash
+gollama
+```
+
+Or from source:
+
 ```bash
 go run .
 ```
